@@ -32,7 +32,8 @@ from itertools import tee
 from weakref import ref
 
 
-__all__ = ['all_subclasses', 'intersperse', 'PeekIterator', 'posix_path',
+__all__ = ['all_subclasses', 'clamp', 'intersperse', 'itemcount',
+           'PeekIterator', 'posix_path',
            'consumer', 'cached', 'cached_property', 'cached_generator',
            'class_property', 'timed', 'Decorator', 'ReadAliasAttribute',
            'NotImplementedAttribute', 'NamedDescriptor',
@@ -50,6 +51,11 @@ def all_subclasses(cls):
             yield subsubcls
 
 
+def clamp(min_value, value, max_value):
+    """Limit `value` to a range between `min_value` and `max_value`"""
+    return max(min_value, min(value, max_value))
+
+
 def intersperse(iterable, element):
     """Generator yielding all elements of `iterable`, but with `element`
     inserted between each two consecutive elements"""
@@ -58,6 +64,11 @@ def intersperse(iterable, element):
     for next_from_iterable in iterable:
         yield element
         yield next_from_iterable
+
+
+def itemcount(iterable):
+    """Count the number of items in `iterable`"""
+    return sum(1 for _ in iterable)
 
 
 class PeekIterator(object):

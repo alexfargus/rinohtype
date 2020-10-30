@@ -6,6 +6,7 @@ Release 0.4.3.dev
 
 New Features:
 
+* The starting number of enumerated lists in reStructuredText is respected.
 * Sphinx frontend: the ``rinoh_metadata`` configuration variable allows
   overriding the document's subtitle (and other strings) that are used on the
   title page and elsewhere in the document template (PR #182 by Alex Fargus).
@@ -13,6 +14,8 @@ New Features:
   when these haven't been specified in the source document.
 * The ``page_break`` style attribute is no longer reserved for sections; a
   page break can be forced before any flowable.
+* Enumerated list items with a hidden label ('hide' style attribute) are no
+  longer counted in the numbering.
 * It's now possible to add arbitrary sections to the front/back matter by
   adding a container with the 'supporting-matter' class and a name to reference
   it by in the document template configuration, e.g. in the list of front
@@ -20,12 +23,18 @@ New Features:
 * Selectors in style sheet files (.rts) now support boolean and 'None' values.
   For example, you can select StaticGroupedFlowables based on whether they have
   any children or not: e.g ``TableCell(empty=true)`` selects empty table cells.
+* "0" is now accepted as a valid value for Dimension-type attributes in style
+  sheets and template configurations
 
 Fixed:
 
+* the 'nested bulleted/enumerated list' selectors were broken; their
+  corresponding styles were never applied
 * items inside a table cannot be referenced (issue #174)
 * Sphinx frontend: fix handling of relative image paths in .rst files inside
   a directory in the Sphinx project root
+* GroupedLabeledFlowables: respect label_min_width and fix a crash with respect
+  to space_below handling
 
 
 Release 0.4.2 (2020-07-28)

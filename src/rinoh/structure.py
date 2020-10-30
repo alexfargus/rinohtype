@@ -6,7 +6,7 @@
 # Public License v3. See the LICENSE file or http://www.gnu.org/licenses/.
 
 
-from itertools import chain
+from itertools import chain, takewhile
 
 from .attribute import Attribute, Bool, Integer, OverrideDefault
 from .draw import Line, LineStyle
@@ -24,7 +24,7 @@ from .reference import ReferenceType
 from .text import StyledText, SingleStyledText, MixedStyledText, Tab
 from .style import PARENT_STYLE
 from .strings import StringCollection, String, StringField
-from .util import NotImplementedAttribute
+from .util import NotImplementedAttribute, itemcount
 
 
 __all__ = ['Section', 'Heading',
@@ -185,18 +185,23 @@ class ListStyle(GroupedFlowablesStyle, NumberStyle):
                        'Bullet to use in unordered lists')
 
 
-class List(StaticGroupedFlowables, Label):
+class List(GroupedLabeledFlowables, StaticGroupedFlowables):
     style_class = ListStyle
 
-    def __init__(self, flowables, id=None, style=None, parent=None):
-        items = [ListItem(i + 1, flowable, parent=self)
-                 for i, flowable in enumerate(flowables)]
-        super().__init__(items, id=id, style=style, parent=parent)
+    def __init__(self, list_items, start_index=1,
+                 id=None, style=None, parent=None):
+        super().__init__(list_items, id=id, style=style, parent=parent)
+        self.start_index = start_index
+
+    def index(self, item, container):
+        items = filter(lambda itm: not itm.label.get_style('hide', container),
+                       takewhile(lambda li: li != item, self.children))
+        return self.start_index + itemcount(items)
 
 
 class ListItem(LabeledFlowable):
-    def __init__(self, index, flowable, id=None, style=None, parent=None):
-        label = ListItemLabel(index)
+    def __init__(self, flowable, id=None, style=None, parent=None):
+        label = ListItemLabel()
         super().__init__(label, flowable, id=id, style=style, parent=parent)
 
 
@@ -207,15 +212,13 @@ class ListItemLabelStyle(ParagraphStyle, LabelStyle):
 class ListItemLabel(ParagraphBase, Label):
     style_class = ListItemLabelStyle
 
-    def __init__(self, index, style=None, parent=None):
-        super().__init__(style=style, parent=parent)
-        self.index = index
-
     def text(self, container):
-        list = self.parent.parent
+        list_item = self.parent
+        list = list_item.parent
         if list.get_style('ordered', container):
+            index = list.index(list_item, container)
             number_format = list.get_style('number_format', container)
-            label = format_number(self.index, number_format)
+            label = format_number(index, number_format)
         else:
             label = list.get_style('bullet', container)
         return MixedStyledText(self.format_label(label, container), parent=self)

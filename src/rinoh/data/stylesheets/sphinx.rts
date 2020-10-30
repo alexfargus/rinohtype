@@ -326,6 +326,7 @@ label_suffix=')'
 [nested enumerated list]
 base=enumerated list
 margin_left=10pt
+space_below=0
 
 [bulleted list]
 base=enumerated list
@@ -335,6 +336,7 @@ label_suffix=None
 [nested bulleted list]
 base=bulleted list
 margin_left=10pt
+space_below=0
 
 [steps list]
 base=enumerated list
@@ -371,7 +373,7 @@ indent_first=0pt
 
 [definition list item]
 label_min_width=17pt
-label_max_width=none
+label_max_width=0
 
 [definition term]
 space_above=4pt

@@ -24,3 +24,19 @@
    iv. iv
 
 #. List items may also be auto-enumerated.
+
+
+A list with numbers going into two digits:
+
+9. nine
+10. ten
+11. eleven
+
+
+And the same with alternative styling:
+
+.. class:: other-style
+
+9. nine
+10. ten
+11. eleven

@@ -31,7 +31,7 @@ from .layout import (InlineDownExpandingContainer, VirtualContainer,
 from .strings import UserStrings
 from .style import Styled, Style
 from .text import StyledText
-from .util import ReadAliasAttribute
+from .util import clamp, ReadAliasAttribute
 
 
 __all__ = ['Flowable', 'FlowableStyle',
@@ -666,12 +666,13 @@ class LabeledFlowable(Flowable):
         self.flowable.prepare(flowable_target)
 
     def label_width(self, container):
+        label_min_width = self.get_style('label_min_width', container)
         label_max_width = self.get_style('label_max_width', container)
         virtual_container = VirtualContainer(container)
         label_width, _, _ = self.label.flow(virtual_container, 0)
         spillover = (label_width > label_max_width.to_points(container.width)
                      if label_max_width else True)
-        return label_width, spillover
+        return max(label_width, label_min_width), spillover
 
     def initial_state(self, container):
         initial_content_state = self.flowable.initial_state(container)
@@ -683,29 +684,20 @@ class LabeledFlowable(Flowable):
             return self.get_style(name, container)
 
         label_min_width = style('label_min_width').to_points(container.width)
-        label_max_width = style('label_max_width')
-        if label_max_width:
-            label_max_width = label_max_width.to_points(container.width)
-        label_spacing = style('label_spacing')
-        wrap_label = style('wrap_label')
+        label_max_width_ = style('label_max_width')
+        label_max_width = (label_max_width_.to_points(container.width)
+                           if label_max_width_ else float('+inf'))
         align_baselines = style('align_baselines')
 
         free_label_width, _ = self.label_width(container)
-
         label_spillover = False
-        if label_column_width:  # part of a GroupedLabeledFlowables
-            label_width = label_column_width
-        elif free_label_width < label_min_width:
-            label_width = label_min_width
-        elif label_max_width and free_label_width <= label_max_width:
-            label_width = free_label_width
-        else:
-            label_width = label_min_width
-
-        if not label_max_width:
+        label_width = label_column_width or clamp(label_min_width,
+                                                  free_label_width,
+                                                  label_max_width)
+        if label_max_width is None:
             label_spillover = True
         elif free_label_width > label_width:
-            if wrap_label:
+            if style('wrap_label'):
                 vcontainer = VirtualContainer(container, width=label_max_width)
                 wrapped_width, _, _ = self.label.flow(vcontainer, 0)
                 if wrapped_width < label_max_width:
@@ -716,13 +708,13 @@ class LabeledFlowable(Flowable):
             else:
                 label_spillover = True
 
-        left = label_width + label_spacing
-        label_cntnr_width = None if label_spillover else label_width
+        left = label_width + style('label_spacing')
+        max_label_width = None if label_spillover else label_width
 
         if align_baselines and (state.initial and not label_spillover):
             label_baseline = find_baseline(self.label, container,
                                            last_descender,
-                                           width=label_cntnr_width)
+                                           width=max_label_width)
             content_state_copy = copy(state.content_flowable_state)
             content_baseline = find_baseline(self.flowable, container,
                                              last_descender, left=left,
@@ -736,31 +728,20 @@ class LabeledFlowable(Flowable):
         try:
             with MaybeContainer(container) as maybe_container:
                 if state.initial:
-                    label_container = \
-                        InlineDownExpandingContainer('LABEL', maybe_container,
-                                                     width=label_cntnr_width,
-                                                     advance_parent=False)
-                    label_container.advance(offset_label)
-                    _, _, label_descender = \
-                        self.label.flow(label_container, last_descender,
-                                        space_below=space_below)
-                    label_height = label_container.height
+                    label_height, label_descender = \
+                        self._flow_label(maybe_container, last_descender,
+                                         max_label_width, offset_label,
+                                         space_below)
                     if label_spillover:
                         maybe_container.advance(label_height)
                         last_descender = label_descender
-                else:
+                else:   # label was placed on previous page
                     label_height = label_descender = 0
                 maybe_container.advance(offset_content)
                 rendering_content = True
-                content_container = \
-                    InlineDownExpandingContainer('CONTENT', maybe_container,
-                                                 left=left,
-                                                 advance_parent=False)
-                width, _, content_descender \
-                    = self.flowable.flow(content_container, last_descender,
-                                         state=state.content_flowable_state,
-                                         space_below=space_below)
-                content_height = content_container.cursor
+                content_height, content_descender, width = \
+                    self._flow_content(maybe_container, last_descender, state,
+                                       left, space_below)
         except (ContainerOverflow, EndOfContainer) as eoc:
             content_state = eoc.flowable_state if rendering_content else None
             state.update(content_state)
@@ -772,6 +753,27 @@ class LabeledFlowable(Flowable):
             container.advance(label_height)
             descender = label_descender
         return left + width, label_baseline, descender
+
+    def _flow_label(self, container, last_descender, max_width, y_offset,
+                    space_below):
+        label_container = \
+            InlineDownExpandingContainer('LABEL', container, width=max_width,
+                                         advance_parent=False)
+        label_container.advance(y_offset)
+        _, _, label_descender = \
+            self.label.flow(label_container, last_descender, None, space_below)
+        return label_container.height, label_descender
+
+    def _flow_content(self, container, last_descender, state, left,
+                      space_below):
+        content_container = \
+            InlineDownExpandingContainer('CONTENT', container, left=left,
+                                         advance_parent=False)
+        width, _, content_descender \
+            = self.flowable.flow(content_container, last_descender,
+                                 state=state.content_flowable_state,
+                                 space_below=space_below)
+        return content_container.cursor, content_descender, width
 
 
 def find_baseline(flowable, container, last_descender, state=None, **kwargs):
@@ -805,7 +807,7 @@ class GroupedLabeledFlowables(GroupedFlowables):
             max_label_width = state.max_label_width
         try:
             return super().render(container, descender, state=state,
-                                  label_column_width=max_label_width)
+                                  label_column_width=max_label_width, **kwargs)
         except EndOfContainer as eoc:
             eoc.flowable_state.max_label_width = max_label_width
             raise

@@ -16,6 +16,7 @@ from sphinx.application import Sphinx
 from sphinx.errors import SphinxError
 from sphinx.util.docutils import docutils_namespace
 from sphinx.util.i18n import format_date
+from sphinx.testing.restructuredtext import parse
 
 from rinoh.document import DocumentTree
 from rinoh.frontend.sphinx import variable_removed_warnings
@@ -383,3 +384,74 @@ def test_sphinx_titles(caplog, tmp_path):
                             rinoh_documents=rinoh_documents)
     titles = app.builder.titles
     assert titles == [('index', "Title"), ('other/', "Other Title")]
+
+
+def get_doctree(app, rst_content):
+    def make_doctree(indexfile):
+        doctree = parse(app, rst_content, indexfile)
+        app.env.resolve_references(doctree, indexfile, app.builder)
+        return doctree
+    return make_doctree
+
+rst_title = """
+Title
+=====
+"""
+
+rst_citation = """
+This is a citation [abc]_
+
+.. [abc] And this is a definition
+"""
+
+rst_section = """
+===
+abc
+===
+
+def
+
+===
+ghi
+===
+
+jkl
+"""
+
+
+def test_sphinx_assemble_doctree_toctree_only(caplog, tmp_path):
+    app = create_sphinx_app(tmp_path)
+    app.env.get_doctree = get_doctree(app, rst_title)
+    doctree, docnames = app.builder.assemble_doctree('index', False)
+    assert docnames == {'index'}
+    assert doctree.children
+
+
+def test_sphinx_assemble_doctree_with_sections(caplog, tmp_path):
+    app = create_sphinx_app(tmp_path)
+    app.env.get_doctree = get_doctree(app, rst_section.replace("=", ""))
+    doctree, _ = app.builder.assemble_doctree('index', False)
+    assert "section:" not in str(doctree.children)
+
+def test_sphinx_assemble_doctree_without_sections(caplog, tmp_path):
+    app = create_sphinx_app(tmp_path)
+    app.env.get_doctree = get_doctree(app, rst_section.replace("=", ""))
+    doctree, _ = app.builder.assemble_doctree('index', False)
+    #assert "section" in str(doctree.children)
+
+def test_sphinx_assemble_doctree_with_citations(caplog, tmp_path):
+    app = create_sphinx_app(tmp_path)
+    app.env.get_doctree = get_doctree(app, rst_citation)
+    expected = app.env.get_doctree("index")
+    doctree, _ = app.builder.assemble_doctree('index', False)
+    assert len(doctree.citations) == len(expected.citations)
+    assert doctree.citations[0].attlist() == expected.citations[0].attlist()
+    assert doctree.children[0].asdom().toxml() == expected.children[0].asdom().toxml()
+    assert doctree.children[1].asdom().toxml() == expected.children[1].asdom().toxml()
+
+def test_sphinx_assemble_doctree_with_references(caplog, tmp_path):
+    pass
+
+
+def test_sphinx_inline_all_toctrees(caplog, tmp_path):
+    pass

@@ -13,7 +13,7 @@ from helpers.regression import verify_output
 
 
 RINOH_PATH = Path(__file__).parent / 'rinoh'
-OUTPUT_PATH = Path(__file__).parent / 'output'
+OUTPUT_PATH = Path(__file__).parent / 'rinoh_output'
 
 
 def test_version(script_runner):
@@ -22,15 +22,25 @@ def test_version(script_runner):
     assert ret.stderr == ''
 
 
+def test_list_formats(script_runner):
+    ret = script_runner.run('rinoh', '--list-formats')
+    assert ret.success
+    assert ret.stderr == ''
+    assert '[built-in]' in ret.stdout
+    assert 'CommonMark' in ret.stdout
+    assert 'reStructuredText' in ret.stdout
+
+
 def collect_tests():
     for rst_path in sorted(RINOH_PATH.glob('*.rst')):
-        yield rst_path.stem
+        yield (pytest.param(rst_path.stem, marks=pytest.mark.xfail)
+               if rst_path.stem == 'install_resources' else rst_path.stem)
 
 
 @pytest.mark.parametrize('test_name', collect_tests())
 def test_rinoh(script_runner, test_name):
     rst_path = Path(test_name + '.rst')
-    args = []
+    args = ['--install-resources']
     templconf_path = rst_path.with_suffix('.rtt')
     if (RINOH_PATH / templconf_path).exists():
         args += ['--template', str(templconf_path)]

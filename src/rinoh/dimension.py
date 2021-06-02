@@ -39,8 +39,7 @@ class DimensionType(type):
 
     def __new__(mcs, name, bases, cls_dict):
         """Return a new class with predefined comparison operators"""
-        for method_name in ('__lt__', '__le__', '__gt__', '__ge__',
-                            '__eq__', '__ne__'):
+        for method_name in ('__lt__', '__le__', '__gt__', '__ge__'):
             if method_name not in cls_dict:
                 cls_dict[method_name] = mcs._make_operator(method_name)
         return type.__new__(mcs, name, bases, cls_dict)
@@ -53,11 +52,7 @@ class DimensionType(type):
         def operator(self, other):
             """Operator delegating to the :class:`float` method `method_name`"""
             float_operator = getattr(float, method_name)
-            try:
-                float_other = float(other)
-            except (ValueError, TypeError):
-                return False
-            return float_operator(float(self), float_other)
+            return float_operator(float(self), float(other))
         return operator
 
 
@@ -109,6 +104,12 @@ class DimensionBase(AcceptNoneAttributeType, metaclass=DimensionType):
         """Evaluate the value of this dimension in points."""
         raise NotImplementedError
 
+    def __eq__(self, other):
+        try:
+            return float(self) == float(other)
+        except (ValueError, TypeError):
+            return False
+
     @classmethod
     def check_type(cls, value):
         return (super().check_type(value) or isinstance(value, Fraction)
@@ -125,7 +126,7 @@ class DimensionBase(AcceptNoneAttributeType, metaclass=DimensionType):
                        """, re.IGNORECASE | re.VERBOSE)
 
     @classmethod
-    def from_tokens(cls, tokens):
+    def from_tokens(cls, tokens, source):
         sign = 1
         if tokens.next.exact_type in (PLUS, MINUS):
             sign = -1 if next(tokens).exact_type == MINUS else 1
@@ -147,7 +148,7 @@ class DimensionBase(AcceptNoneAttributeType, metaclass=DimensionType):
         try:
             unit = DimensionUnitBase.all[unit_string.lower()]
         except KeyError:
-            raise ValueError("'{}' is not a valid dimension unit"
+            raise ParseError("'{}' is not a valid dimension unit"
                              .format(unit_string))
         return sign * value * unit
 
@@ -352,4 +353,5 @@ class FractionUnit(DimensionUnitBase):
 
 
 PERCENT = FractionUnit(100, '%')            #: fraction of 100
+HALVES = FractionUnit(2, '/2')              #: fraction of 2
 QUARTERS = FractionUnit(4, '/4')            #: fraction of 4

@@ -9,23 +9,22 @@
 import os
 
 from ast import literal_eval
-from functools import partial
+from pathlib import Path
 from token import LPAR, RPAR, NAME, EQUAL, NUMBER, ENDMARKER,  STRING, COMMA
 
-from .attribute import (Attribute, AcceptNoneAttributeType, Integer,
-                        OptionSet, AttributesDictionary, ParseError)
-from .color import RED
+from .attribute import (Attribute, AttributesDictionary, OverrideDefault,
+                        AcceptNoneAttributeType, OptionSet, Integer,
+                        ParseError)
 from .dimension import Dimension, PERCENT
 from .flowable import (Flowable, FlowableState, HorizontalAlignment,
                        FlowableWidth, StaticGroupedFlowables,
                        GroupedFlowablesStyle, Float, FloatStyle)
 from .inline import InlineFlowable
 from .layout import ContainerOverflow, EndOfContainer
-from .number import NumberedParagraph, NumberedParagraphStyle, format_number
-from .paragraph import Paragraph
-from .reference import ReferenceType
+from .number import NumberFormat
+from .paragraph import StaticParagraph, Paragraph, ParagraphStyle
 from .structure import ListOf, ListOfSection
-from .text import MixedStyledText, SingleStyledText, TextStyle, StyledText
+from .text import MixedStyledText, SingleStyledText, TextStyle, ErrorText
 from .util import posix_path, ReadAliasAttribute, PeekIterator
 
 
@@ -49,9 +48,9 @@ class Scale(OptionSet):
         return super().check_type(value) or value > 0
 
     @classmethod
-    def from_tokens(cls, tokens):
+    def from_tokens(cls, tokens, source):
         if tokens.next.type == NAME:
-            value = super().from_tokens(tokens)
+            value = super().from_tokens(tokens, source)
         elif tokens.next.type == NUMBER:
             value = float(next(tokens).string)
             if not cls.check_type(value):
@@ -92,7 +91,7 @@ class OptionalArg(Attribute):
 
 class ImagePath(AcceptNoneAttributeType):
     @classmethod
-    def from_tokens(cls, tokens):
+    def from_tokens(cls, tokens, source):
         token = next(tokens)
         if token.type != STRING:
             raise ParseError('Expecting a string')
@@ -113,7 +112,7 @@ class ImageArgsBase(AttributesDictionary):
     rotate = OptionalArg(Integer, 0, 'Angle in degrees to rotate the image')
 
     @staticmethod
-    def _parse_argument(argument_definition, tokens):
+    def _parse_argument(argument_definition, tokens, source):
         arg_tokens = []
         depth = 0
         for token in tokens:
@@ -127,13 +126,13 @@ class ImageArgsBase(AttributesDictionary):
                 break
         argument_type = argument_definition.accepted_type
         arg_tokens_iter = PeekIterator(arg_tokens)
-        argument = argument_type.from_tokens(arg_tokens_iter)
+        argument = argument_type.from_tokens(arg_tokens_iter, source)
         if not arg_tokens_iter.at_end:
             raise ParseError('Syntax error')
         return argument, tokens.next.exact_type in (RPAR, ENDMARKER)
 
     @classmethod
-    def parse_arguments(cls, tokens):
+    def parse_arguments(cls, tokens, source):
         argument_defs = (cls.attribute_definition(name)
                          for name in cls._all_attributes)
         args, kwargs = [], {}
@@ -142,7 +141,8 @@ class ImageArgsBase(AttributesDictionary):
         # required arguments
         for argument_def in (argdef for argdef in argument_defs
                              if isinstance(argdef, RequiredArg)):
-            argument, is_last_arg = cls._parse_argument(argument_def, tokens)
+            argument, is_last_arg = cls._parse_argument(argument_def, tokens,
+                                                        source)
             args.append(argument)
         # optional arguments
         while not is_last_arg:
@@ -161,7 +161,8 @@ class ImageArgsBase(AttributesDictionary):
             except KeyError:
                 raise ParseError('Unsupported argument keyword: {}'
                                  .format(keyword))
-            argument, is_last_arg = cls._parse_argument(argument_def, tokens)
+            argument, is_last_arg = cls._parse_argument(argument_def, tokens,
+                                                        source)
             kwargs[keyword] = argument
         return args, kwargs
 
@@ -199,8 +200,9 @@ class ImageBase(Flowable):
 
     def __init__(self, filename_or_file, scale=1.0, width=None, height=None,
                  dpi=None, rotate=0, limit_width=None,
-                 id=None, style=None, parent=None, **kwargs):
-        super().__init__(id=id, style=style, parent=parent, **kwargs)
+                 id=None, style=None, parent=None, source=None, **kwargs):
+        super().__init__(id=id, style=style, parent=parent, source=source,
+                         **kwargs)
         self.filename_or_file = filename_or_file
         if (width, height) != (None, None):
             if scale != 1.0:
@@ -216,6 +218,13 @@ class ImageBase(Flowable):
         self.rotate = rotate
         self.limit_width = limit_width
 
+    def copy(self, parent=None):
+        return type(self)(self.filename_or_file, scale=self.scale,
+                          width=self.width, height=self.height, dpi=self.dpi,
+                          rotate=self.rotate, limit_width=self.limit_width,
+                          id=self.id, style=self.style, parent=parent,
+                          source=self.source)
+
     @property
     def filename(self):
         if isinstance(self.filename_or_file, str):
@@ -227,23 +236,28 @@ class ImageBase(Flowable):
     def initial_state(self, container):
          return ImageState(self)
 
+    def _absolute_path_or_file(self):
+        try:
+            file_path = Path(self.filename_or_file)
+        except AttributeError:          # self.filename_or_file is a file
+            return self.filename_or_file
+        if file_path.is_absolute():
+            return file_path
+        if self.source_root is None:
+            raise ValueError('Image file path should be absolute:'
+                             ' {}'.format(file_path))
+        return self.source_root / file_path
+
     def render(self, container, last_descender, state, **kwargs):
         try:
-            try:
-                posix_filename = posix_path(self.filename_or_file)
-            except AttributeError:  # self.filename_or_file is a file
-                filename_or_file = self.filename_or_file
-            else:
-                source_root = container.document.document_tree.source_root
-                abs_filename = source_root / posix_filename
-                filename_or_file = os.path.normpath(str(abs_filename))
+            filename_or_file = self._absolute_path_or_file()
             image = container.document.backend.Image(filename_or_file)
         except OSError as err:
             container.document.error = True
             message = "Error opening image file: {}".format(err)
             self.warn(message)
-            text = SingleStyledText(message, style=TextStyle(font_color=RED))
-            return Paragraph(text).flow(container, last_descender)
+            error = ErrorText(message)
+            return Paragraph(error).flow(container, last_descender)
         left, top = 0, float(container.cursor)
         width = self._width(container)
         try:
@@ -296,24 +310,32 @@ class InlineImage(ImageBase, InlineFlowable):
 
     def __init__(self, filename_or_file, scale=1.0, width=None, height=None,
                  dpi=None, rotate=0, baseline=None,
-                 id=None, style=None, parent=None):
+                 id=None, style=None, parent=None, source=None):
         super().__init__(filename_or_file=filename_or_file, scale=scale,
                          height=height, dpi=dpi, rotate=rotate,
-                         baseline=baseline, id=id, style=style, parent=parent)
+                         baseline=baseline, id=id, style=style, parent=parent,
+                         source=source)
         self.width = width
 
     def _width(self, container):
         return FlowableWidth.AUTO if self.width is None else self.width
 
+    def copy(self, parent=None):
+        return type(self)(self.filename_or_file, scale=self.scale,
+                          width=self.width, height=self.height, dpi=self.dpi,
+                          rotate=self.rotate, baseline=self.baseline,
+                          id=self.id, style=self.style, parent=parent,
+                          source=self.source)
+
 
 class _Image(ImageBase):
     def __init__(self, filename_or_file, scale=1.0, width=None, height=None,
                  dpi=None, rotate=0, limit_width=100*PERCENT, align=None,
-                 id=None, style=None, parent=None):
+                 id=None, style=None, parent=None, source=None):
         super().__init__(filename_or_file=filename_or_file, scale=scale,
                          width=width, height=height, dpi=dpi, rotate=rotate,
                          limit_width=limit_width, align=align,
-                         id=id, style=style, parent=parent)
+                         id=id, style=style, parent=parent, source=source)
 
 
 class Image(_Image):
@@ -342,9 +364,9 @@ class BackgroundImage(_Image, AcceptNoneAttributeType):
     arguments = ImageArgs
 
     @classmethod
-    def from_tokens(cls, tokens):
-        args, kwargs = cls.arguments.parse_arguments(tokens)
-        return cls(*args, **kwargs)
+    def from_tokens(cls, tokens, source):
+        args, kwargs = cls.arguments.parse_arguments(tokens, source)
+        return cls(*args, source=source, **kwargs)
 
     @classmethod
     def doc_format(cls):
@@ -354,49 +376,23 @@ class BackgroundImage(_Image, AcceptNoneAttributeType):
                 'displayed')
 
 
-class CaptionStyle(NumberedParagraphStyle):
-    numbering_level = Attribute(Integer, 1, 'At which section level to '
-                                            'restart numbering')
-    number_separator = Attribute(StyledText, '.', 'Characters inserted between'
-                                 ' the section number and the caption number')
+class CaptionStyle(ParagraphStyle):
+    number_format = OverrideDefault(NumberFormat.NUMBER)
+    numbering_level = OverrideDefault(1)
 
 
-class Caption(NumberedParagraph):
+class Caption(StaticParagraph):
     style_class = CaptionStyle
+    has_title = True
 
     @property
     def referenceable(self):
         return self.parent
 
-    def prepare(self, flowable_target):
-        super().prepare(flowable_target)
-        document = flowable_target.document
-        get_style = partial(self.get_style, container=flowable_target)
-        category = self.referenceable.category
-        numbering_level = get_style('numbering_level')
-        section = self.section
-        while section and section.level > numbering_level:
-            section = section.parent.section
-        section_id = section.get_id(document, False) if section else None
-        category_counters = document.counters.setdefault(category, {})
-        category_counter = category_counters.setdefault(section_id, [])
-        category_counter.append(self)
-        number_format = get_style('number_format')
-        number = format_number(len(category_counter), number_format)
-        if section_id:
-            section_number = document.get_reference(section_id, 'number')
-            sep = get_style('number_separator') or SingleStyledText('')
-            number = section_number + sep.to_string(flowable_target) + number
-        reference = '{} {}'.format(category, number)
-        for id in self.referenceable.get_ids(document):
-            document.set_reference(id, ReferenceType.NUMBER, number)
-            document.set_reference(id, ReferenceType.REFERENCE, reference)
-            document.set_reference(id, ReferenceType.TITLE,
-                                   self.content.to_string(None))
-
     def text(self, container):
-        label = self.referenceable.category + ' ' + self.number(container)
-        return MixedStyledText(label + self.content, parent=self)
+        cat = self.referenceable.category
+        number = self.number(container)
+        return MixedStyledText([cat, ' ', number, self.content], parent=self)
 
 
 class FigureStyle(FloatStyle, GroupedFlowablesStyle):

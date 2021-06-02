@@ -48,8 +48,8 @@ class Inline(DocutilsInlineNode):
         return self.process_content(style=self.style_from_class)
 
 
-class Document(DocutilsBodyNode):
-    pass
+class Document(DocutilsGroupingNode):
+    grouped_flowables_class = rt.DocumentTree
 
 
 class DocInfo(DocutilsBodyNode):
@@ -383,7 +383,7 @@ class Line_Block(Paragraph):
 
     def process_content(self, style=None):
         lines = self._process_block(self)
-        return intersperse(lines, rt.Newline())
+        return rt.MixedStyledText(intersperse(lines, rt.Newline()))
 
 
 class Line(DocutilsInlineNode):
@@ -396,27 +396,25 @@ class Doctest_Block(DocutilsBodyNode):
 
 
 class Reference(DocutilsBodyNode, DocutilsInlineNode):
-    @property
-    def annotation(self):
-        if self.get('refid'):
-            return rt.NamedDestinationLink(self.get('refid'))
-        elif self.get('refuri'):
-            return rt.HyperLink(self.get('refuri'))
-
     def build_styled_text(self):
-        annotation = self.annotation
         content = self.process_content()
-        if annotation is None:
-            return rt.MixedStyledText(content, style='broken link')
-        style = ('external link' if annotation.type == 'URI'
-                 else 'internal link')
-        return rt.AnnotatedText(content, annotation, style=style)
+        if self.get('refid'):
+            return rt.Reference(self.get('refid'), custom_title=content)
+        elif self.get('refuri'):
+            content.annotation = rt.HyperLink(self.get('refuri'))
+            content.style = 'external link'
+        else:
+            content.style = 'broken link'
+        return content
 
     def build_flowable(self):
         children = self.getchildren()
         assert len(children) == 1
         image = self.image.flowable()
-        image.annotation = self.annotation
+        if self.get('refid'):
+            image.annotation = rt.NamedDestinationLink(self.get('refid'))
+        elif self.get('refuri'):
+            image.annotation = rt.HyperLink(self.get('refuri'))
         return image
 
 
@@ -461,11 +459,12 @@ class Substitution_Definition(DocutilsBodyNode):
 class Target(DocutilsBodyNode, DocutilsInlineNode):
     def build_styled_text(self):
         # TODO: what about refid?
+        content = self.process_content()
         try:
-            destination = rt.NamedDestination(*self._ids)
-            return rt.AnnotatedText(self.process_content(), destination)
+            content.annotation = rt.NamedDestination(*self._ids)
         except IndexError:
-            return self.process_content()   # TODO: use refname?
+            pass
+        return content
 
     def build_flowable(self):
         return rt.AnchorFlowable()
@@ -517,8 +516,7 @@ class Term(DocutilsInlineNode):
     def build_styled_text(self):
         content = self.process_content()
         if self._ids:
-            destination = rt.NamedDestination(*self._ids)
-            content = rt.AnnotatedText(content, destination)
+            content.annotation = rt.NamedDestination(*self._ids)
         return content
 
 
@@ -606,23 +604,41 @@ class Image(DocutilsBodyNode, DocutilsInlineNode):
     def image_path(self):
         return self.get('uri')
 
-    def build_flowable(self):
-        width_string = self.get('width')
+    @property
+    def options(self):
+        width = convert_quantity(self.get('width'))
+        height = convert_quantity(self.get('height'))
         align = self.get('align')
-        return rt.Image(self.image_path, scale=self.get('scale', 100) / 100,
-                        width=convert_quantity(width_string), align=align)
+        scale = self.get('scale', 100) / 100
+        if scale != 1 and (width or height):
+            width = width * scale if width else None
+            height = height * scale if height else None
+            scale = 1
+        return dict(align=align, width=width, height=height, scale=scale)
+
+    def build_flowable(self):
+        return rt.Image(self.image_path, **self.options)
 
     ALIGN_TO_BASELINE = {'bottom': 0,
                          'middle': 50*PERCENT,
                          'top': 100*PERCENT}
 
     def build_styled_text(self):
-        baseline = self.ALIGN_TO_BASELINE.get(self.get('align'))
-        return rt.InlineImage(self.image_path, baseline=baseline)
+        options = self.options
+        baseline = self.ALIGN_TO_BASELINE.get(options.pop('align'))
+        return rt.InlineImage(self.image_path, baseline=baseline, **options)
 
 
 class Figure(DocutilsGroupingNode):
     grouped_flowables_class = rt.Figure
+
+    def flowables(self):
+        figure, = super().flowables()
+        if figure.id is None:   # docutils
+            image = figure.children[0]
+            figure.id = image.id
+            figure.secondary_ids = image.secondary_ids
+        yield figure
 
 
 class Caption(DocutilsBodyNode):
@@ -639,7 +655,7 @@ class Transition(DocutilsBodyNode):
         return rt.HorizontalRule()
 
 
-RE_LENGTH_PERCENT_UNITLESS = re.compile(r'^(?P<value>\d+)(?P<unit>[a-z%]*)$')
+RE_LENGTH_PERCENT_UNITLESS = re.compile(r'^(?P<value>\d+\.?\d*)(?P<unit>[a-z%]*)$')
 
 # TODO: warn on px or when no unit is supplied
 DOCUTILS_UNIT_TO_DIMENSION = {'': PT,    # assume points for unitless quantities
@@ -648,7 +664,7 @@ DOCUTILS_UNIT_TO_DIMENSION = {'': PT,    # assume points for unitless quantities
                               'mm': MM,
                               'pt': PT,
                               'pc': PICA,
-                              'px': DimensionUnit(1 / 100 * INCH, 'px'),
+                              'px': DimensionUnit(1 / 96 * INCH, 'px'),
                               '%': PERCENT,
                               'em': None,
                               'ex': None}
@@ -674,14 +690,28 @@ class Table(DocutilsBodyNode):
         except AttributeError:
             head = None
         body = tgroup.tbody.get_table_section()
+        align = self.get('align')
         width_string = self.get('width')
-        table = rt.Table(body, head=head, width=convert_quantity(width_string),
+        table = rt.Table(body, head=head,
+                         align=None if align == 'default' else align,
+                         width=convert_quantity(width_string),
                          column_widths=column_widths)
         try:
             caption = rt.Caption(self.title.process_content())
-            return rt.TableWithCaption([caption, table])
         except AttributeError:
             return table
+        table_with_caption = rt.TableWithCaption([caption, table])
+        return table_with_caption
+
+    def flowables(self):
+        classes = self.get('classes')
+        flowable, = super(DocutilsBodyNode, self).flowables()
+        try:
+            caption, table = flowable.children
+        except AttributeError:
+            table = flowable
+        table.classes.extend(classes)
+        yield flowable
 
 
 class TGroup(DocutilsNode):
@@ -748,16 +778,22 @@ class Raw(DocutilsBodyNode, DocutilsInlineNode):
 
 
 class Container(DocutilsGroupingNode):
+    @property
+    def set_id(self):
+        return 'out-of-line' not in self['classes']
+
     def build_flowable(self, style=None, **kwargs):
         classes = self.get('classes')
         if 'literal-block-wrapper' in classes:
             return rt.CodeBlockWithCaption(self.children_flowables(),
                                            style=style or self.style, **kwargs)
-        if 'supporting-matter' in classes:
-            if not self._ids:
-                raise MissingName('supporting-matter container is missing a'
-                                  ' :name: to reference it by')
-            return rt.SetSupportingMatter(self.children_flowables(), **kwargs)
+        if 'out-of-line' in classes:
+            names = self['names']
+            if not names:
+                raise MissingName('out-of-line container is missing a :name:'
+                                  ' to reference it by')
+            return rt.SetOutOfLineFlowables(names, self.children_flowables(),
+                                            **kwargs)
         return super().build_flowable(style, **kwargs)
 
 

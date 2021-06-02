@@ -1,40 +1,167 @@
 Release History
 ---------------
 
-Release 0.4.3.dev
-~~~~~~~~~~~~~~~~~
+Release 0.5.3 (in development)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 New Features:
 
+* Document part templates now accept a *page_number_prefix* (StyledText). For
+  example, set ``page_number_prefix = '{SECTION_NUMBER(1)}-'`` to prefix the
+  page number with the chapter number. You'll want to use this with the new
+  page break options (see next item).
+* The ``page_break`` style attribute now also accepts *left restart*, *right
+  restart* and *any restart* values to restart page numbering
+* The new *continue* page number format makes it more explicit when to not
+  restart page numbering.
+* Setting the *base* for a style to ``NEXT_STYLE`` proceeds to look up style
+  attributes in the next matching style if they are undefined.
+* If the *RINOH_NO_CACHE* environment variable is set, the references cache
+  (.rtc file) won't be loaded nor saved. This is mostly useful for testing.
+
+Changed:
+
+* Smarter automatic sizing of table columns; don't needlessly pad columns whose
+  contents don't require wrapping.
+
+Fixed:
+
+* Setting the *base* for a style to ``PARENT_STYLE`` results in a crash.
+* docutils image directive: crash when encountering a width/height containing a
+  decimal point (#251 by Karel Frajtak)
+* docutils inline images don't support width, height and scale options
+
+
+Release 0.5.2 (2021-02-24)
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+New Features:
+
+* If the *RINOH_SINGLE_PASS* environment variable is set, rendering will be
+  stopped after a single pass. This speeds up iteration when tweaking style
+  sheets or templates.
+* Sphinx builder: the ``rinoh_targets`` configuration variable allows limiting
+  the documents to a subset of those listed in ``rinoh_documents``.
+* The 'number_format' style property can now also accept styled text strings
+  which replace the auto-numbered label.
+* Document elements (Styled objects) can more easily be matched based on their
+  ID (or 'name' in docutils terms) by means of the *has_id* selector property.
+
+Changed:
+
+* docutils/Sphinx frontend: will default to referencing targets by number if
+  possible, even if a custom label is explicitly set. This behaviour can be
+  overridden in the style sheet by setting the *type* property of the
+  *linked reference* style to 'custom' (see also issue #244).
+
+Fixed:
+
+* Sphinx style sheet: the object description is always rendered to the right
+  of the signature, no matter how wide the signature is.
+* Incorrect/useless warnings that popped up with release 0.5.1.
+
+Part of the work included in this release was kindly sponsored by `Joby
+Aviation <https://www.jobyaviation.com>`_.
+
+
+Release 0.5.1 (2021-02-19)
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+New Features:
+
+* Paragraphs can now be numbered. rinohtype also allows for referencing them by
+  number, but docutils/Sphinx doesn't readily offer the means express that. A
+  workaround for this will be included in a future release.
+
+Fixed:
+
+* Fix issues with metadata (title, author) stored in the PDF Info dictionary
+* Fix handling of no-break spaces (they were rendered using the fallback font)
+* When a caption occurs in an unnumbered chapter, an exception aborts rendering
+  (even when ``number_separator`` style attribute is set to ``None``)
+* Handling of base template specified as string in a template configuration
+* Table column widths entries now also accept fractions
+
+Part of the work included in this release was kindly sponsored by `Joby
+Aviation <https://www.jobyaviation.com>`_.
+
+
+Release 0.5.0 (2021-02-03)
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+New Features:
+
+* Google Fonts: if a specified typeface is not installed, rinohtype attempts
+  to download the corresponding fonts from Google Fonts. Simply supply the font
+  name as listed on https://fonts.google.com as a value for the ``typeface``
+  style property.
+* Table: in addition to fixed and relative-width columns, you can indicate
+  columns to be automatically sized by specifying a value of 'auto' in the
+  'column_widths' style parameter in your style sheet.
+* docutils frontend: support the ``:align:`` option to table directives, which
+  will override the alignment set for the table in the style sheet.
 * The starting number of enumerated lists in reStructuredText is respected.
-* Sphinx frontend: the ``rinoh_metadata`` configuration variable allows
-  overriding the document's subtitle (and other strings) that are used on the
-  title page and elsewhere in the document template (PR #182 by Alex Fargus).
 * Table column widths can be specified in the style sheet, which take effect
   when these haven't been specified in the source document.
+* Document elements now store where they have been defined (document tree,
+  style sheet file or template configuration file); when you specify relative
+  paths (e.g. for images), they are interpreted relative to the location of
+  their source. This should make things more intuitive.
 * The ``page_break`` style attribute is no longer reserved for sections; a
   page break can be forced before any flowable.
 * Enumerated list items with a hidden label ('hide' style attribute) are no
   longer counted in the numbering.
-* It's now possible to add arbitrary sections to the front/back matter by
-  adding a container with the 'supporting-matter' class and a name to reference
-  it by in the document template configuration, e.g. in the list of front
-  matter flowables (to be documented).
+* Templates and typefaces can be registered by name at runtime. This makes them
+  referencable from template configuration and style sheet files. For example,
+  custom templates/typefaces can be imported in a Sphinx project's `conf.py`
+  (to be documented).
+* It's now possible to add arbitrary reStructuredText content to the front/back
+  matter or  elsewhere by adding a ``.. container::`` with the 'out-of-line'
+  class and a ``:name:`` to reference it by in the document template
+  configuration, e.g. in the list of front matter flowables (to be documented).
 * Selectors in style sheet files (.rts) now support boolean and 'None' values.
   For example, you can select StaticGroupedFlowables based on whether they have
   any children or not: e.g ``TableCell(empty=true)`` selects empty table cells.
+* The document's title and author are now stored in the PDF metadata.
 * "0" is now accepted as a valid value for Dimension-type attributes in style
-  sheets and template configurations
+  sheets and template configurations.
+
+Changed:
+
+* Rendering speed was more than doubled (caching)! (PR #197 by Alex Fargus)
+* Sphinx frontend: ``rinoh_documents`` now takes a list of dictionaries, one
+  for each PDF document to be built. This allows selecting e.g. the template
+  and logo on a per-document level. Support for ``rinoh_template``,
+  ``rinoh_stylesheet``, ``rinoh_paper_size``, ``rinoh_domain_indices`` and
+  ``rinoh_logo`` was removed. Fallback to ``latex_documents`` is retained.
+  (PR #182, #192, #195, #208 and #216 by Alex Fargus)
+* The default stylesheet ('Sphinx') now prevents captions from being separated
+  from their image/table/code block (across pages).
+* Font weights and widths are now internally represented by integer classes.
+  In addition to integer values, string values are still accepted (mapped to
+  classes).
+* OpenTypeFont now determines the font weight, slant and width from the file.
+  For backward compatibility, it still accepts these as arguments on
+  instantiation but warns when they don't match the values stored in the font.
 
 Fixed:
 
-* the 'nested bulleted/enumerated list' selectors were broken; their
+* Table column width determination was overhauled. Now fixed-width tables are
+  supported and automatic-width columns should be handled better.
+* The 'nested bulleted/enumerated list' selectors were broken; their
   corresponding styles were never applied
-* items inside a table cannot be referenced (issue #174)
+* Items inside a table cannot be referenced (issue #174)
 * Sphinx frontend: fix handling of relative image paths in .rst files inside
   a directory in the Sphinx project root
+* rinoh: fix --install-resources (broken since PyPI disabled XMLRPC searches)
 * GroupedLabeledFlowables: respect label_min_width and fix a crash with respect
   to space_below handling
+* Duplicate rendering of content in columns; if content was too small to fill
+  the first column, it was rendered again in subsequent columns.
+* Crash on encountering a style for which no selector is defined.
+
+Part of the work included in this release was kindly sponsored by `Joby
+Aviation <https://www.jobyaviation.com>`_.
 
 
 Release 0.4.2 (2020-07-28)

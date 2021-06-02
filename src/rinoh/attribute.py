@@ -22,9 +22,10 @@ from .util import (NamedDescriptor, WithNamedDescriptors,
                    cached)
 
 
-__all__ = ['AttributeType', 'AcceptNoneAttributeType', 'OptionSet', 'Attribute',
-           'OverrideDefault', 'AttributesDictionary', 'Configurable',
-           'RuleSet', 'RuleSetFile', 'Bool', 'Integer', 'ParseError', 'Var']
+__all__ = ['AttributeType', 'AcceptNoneAttributeType', 'OptionSet',
+           'OptionSetMeta', 'Attribute', 'OverrideDefault',
+           'AttributesDictionary', 'Configurable', 'RuleSet', 'RuleSetFile',
+           'Bool', 'Integer', 'ParseError', 'Var']
 
 
 class AttributeType(object):
@@ -39,40 +40,27 @@ class AttributeType(object):
         return isinstance(value, cls)
 
     @classmethod
-    def from_string(cls, string):
-        return cls.parse_string(string)
+    def from_string(cls, string, source=None):
+        return cls.parse_string(string, source)
 
     @classmethod
-    def parse_string(cls, string):
+    def parse_string(cls, string, source):
         tokens = TokenIterator(string)
-        result = cls.from_tokens(tokens)
+        value = cls.from_tokens(tokens, source)
         if next(tokens).type != ENDMARKER:
             raise ParseError('Syntax error')
-        return result
+        return value
 
     @classmethod
-    def from_tokens(cls, tokens):
+    def from_tokens(cls, tokens, source):
         raise NotImplementedError(cls)
 
-    RE_VARIABLE = re.compile(r'^\$\(([a-z_ -]+)\)$', re.IGNORECASE)
-
     @classmethod
-    def validate(cls, value, accept_variables=False, attribute_name=None):
+    def validate(cls, value):
         if isinstance(value, str):
-            stripped = value.replace('\n', ' ').strip()
-            m = cls.RE_VARIABLE.match(stripped)
-            if m:
-                value = Var(m.group(1))
-            else:
-                value = cls.from_string(stripped)
-        if isinstance(value, Var):
-            if not accept_variables:
-                raise TypeError("The '{}' attribute does not accept variables"
-                                .format(attribute_name))
-        elif not cls.check_type(value):
-            raise TypeError("{} ({}) is not of the correct type for the '{}' "
-                            "attribute".format(value, type(value).__name__,
-                                               attribute_name))
+            value = cls.from_string(value)
+        if not cls.check_type(value):
+            raise TypeError("{} is not of type {}".format(value, cls.__name__))
         return value
 
     @classmethod
@@ -94,10 +82,10 @@ class AcceptNoneAttributeType(AttributeType):
                 or super(__class__, cls).check_type(value))
 
     @classmethod
-    def from_string(cls, string):
+    def from_string(cls, string, source=None):
         if string.strip().lower() == 'none':
             return None
-        return super(__class__, cls).from_string(string)
+        return super(__class__, cls).from_string(string, source)
 
     @classmethod
     def doc_repr(cls, value):
@@ -139,15 +127,19 @@ class OptionSet(AttributeType, metaclass=OptionSetMeta):
                 for value in cls.values]
 
     @classmethod
-    def from_tokens(cls, tokens):
+    def _value_from_tokens(cls, tokens):
         if tokens.next.type != NAME:
             raise ParseError('Expecting a name')
         token = next(tokens)
         _, start_col = token.start
-        while tokens.next and tokens.next.type == NAME:
+        while tokens.next and tokens.next.exact_type in (NAME, MINUS):
             token = next(tokens)
         _, end_col = token.end
-        option_string = token.line[start_col:end_col].strip()
+        return token.line[start_col:end_col].strip()
+
+    @classmethod
+    def from_tokens(cls, tokens, source):
+        option_string = cls._value_from_tokens(tokens)
         try:
             index = cls.value_strings.index(option_string.lower())
         except ValueError:
@@ -173,6 +165,7 @@ class Attribute(NamedDescriptor):
         self.accepted_type = accepted_type
         self.default_value = accepted_type.validate(default_value)
         self.description = description
+        self.source = None
 
     def __get__(self, style, type=None):
         try:
@@ -225,7 +218,7 @@ class WithAttributes(WithNamedDescriptors):
                     try:
                         attr.overrides = mro_cls._attributes[name]
                         break
-                    except KeyError:
+                    except (AttributeError, KeyError):
                         pass
                 else:
                     raise NotImplementedError
@@ -281,19 +274,10 @@ class WithAttributes(WithNamedDescriptors):
 
 class AttributesDictionary(OrderedDict, metaclass=WithAttributes):
     def __init__(self, base=None, **attributes):
+        self.name = None
+        self.source = None
         self.base = base
-        for name, value in attributes.items():
-            attributes[name] = self.validate_attribute(name, value, True)
         super().__init__(attributes)
-
-    @classmethod
-    def validate_attribute(cls, name, value, accept_variables):
-        try:
-            attribute_type = cls.attribute_definition(name).accepted_type
-        except KeyError:
-            raise TypeError('{} is not a supported attribute for {}'
-                            .format(name, cls.__name__))
-        return attribute_type.validate(value, accept_variables, name)
 
     @classmethod
     def _get_default(cls, attribute):
@@ -320,6 +304,14 @@ class AttributesDictionary(OrderedDict, metaclass=WithAttributes):
         raise KeyError(name)
 
     @classmethod
+    def attribute_type(cls, name):
+        try:
+            return cls.attribute_definition(name).accepted_type
+        except KeyError:
+            raise TypeError('{} is not a supported attribute for {}'
+                            .format(name, cls.__name__))
+
+    @classmethod
     def get_ruleset(self):
         raise NotImplementedError
 
@@ -344,17 +336,39 @@ class BaseConfigurationException(Exception):
         self.name = base_name
 
 
-class RuleSet(OrderedDict):
+class Source(object):
+    """Describes where a :class:`DocumentElement` was defined"""
+
+    @property
+    def location(self):
+        """Textual representation of this source"""
+        return repr(self)
+
+    @property
+    def root(self):
+        """Directory path for resolving paths relative to this source"""
+        return None
+
+
+class RuleSet(OrderedDict, Source):
     main_section = NotImplementedAttribute()
 
-    def __init__(self, name, base=None, **kwargs):
+    def __init__(self, name, base=None, source=None, **kwargs):
         super().__init__(**kwargs)
         self.name = name
         self.base = base
+        self.source = source
         self.variables = OrderedDict()
 
     def contains(self, name):
         return name in self or (self.base and self.base.contains(name))
+
+    def find_source(self, name):
+        """Find top-most ruleset where configuration `name` is defined"""
+        if name in self:
+            return self.name
+        if self.base:
+            return self.base.find_source(name)
 
     def get_configuration(self, name):
         try:
@@ -364,11 +378,11 @@ class RuleSet(OrderedDict):
                 return self.base.get_configuration(name)
             raise
 
-    def __setitem__(self, name, style):
+    def __setitem__(self, name, item):
         assert name not in self
-        if isinstance(style, AttributesDictionary):
-            style.name = name
-        super().__setitem__(name, style)
+        if isinstance(item, AttributesDictionary):  # FIXME
+            self._validate_attributes(name, item)
+        super().__setitem__(name, item)
 
     def __call__(self, name, **kwargs):
         self[name] = self.get_entry_class(name)(**kwargs)
@@ -382,14 +396,44 @@ class RuleSet(OrderedDict):
     def __bool__(self):
         return True
 
-    def get_variable(self, variable):
+    RE_VARIABLE = re.compile(r'^\$\(([a-z_ -]+)\)$', re.IGNORECASE)
+
+    def _validate_attributes(self, name, attr_dict):
+        attr_dict.name = name
+        attr_dict.source = self
+        for key, val in attr_dict.items():
+            attr_dict[key] = self._validate_attribute(attr_dict, key, val)
+
+    def _validate_attribute(self, attr_dict, name, value):
+        attribute_type = attr_dict.attribute_type(name)
+        if isinstance(value, str):
+            stripped = value.replace('\n', ' ').strip()
+            m = self.RE_VARIABLE.match(stripped)
+            if m:
+                return Var(m.group(1))
+            value = self._attribute_from_string(attribute_type, stripped)
+        elif hasattr(value, 'source'):
+            value.source = self
+        if not isinstance(value, Var) and not attribute_type.check_type(value):
+            raise TypeError("{} ({}) is not of the correct type for the '{}' "
+                            "attribute".format(value, type(value).__name__,
+                                               name))
+        return value
+
+    @cached
+    def _attribute_from_string(self, attribute_type, string):
+        return attribute_type.from_string(string, self)
+
+    def get_variable(self, configuration_class, attribute, variable):
         try:
-            return self.variables[variable.name]
+            value = self.variables[variable.name]
         except KeyError:
-            if self.base:
-                return self.base.get_variable(variable)
-            raise VariableNotDefined("Variable '{}' is not defined"
-                                     .format(variable.name))
+            if not self.base:
+                raise VariableNotDefined("Variable '{}' is not defined"
+                                         .format(variable.name))
+            return self.base.get_variable(configuration_class, attribute,
+                                          variable)
+        return self._validate_attribute(configuration_class, attribute, value)
 
     def get_entry_class(self, name):
         raise NotImplementedError
@@ -424,15 +468,14 @@ class RuleSet(OrderedDict):
         except DefaultValueException:
             value = configurable.configuration_class._get_default(attribute)
         if isinstance(value, Var):
-            config = configurable.configuration_class
-            value = config.validate_attribute(attribute,
-                                              self.get_variable(value), False)
+            configuration_class = configurable.configuration_class
+            value = self.get_variable(configuration_class, attribute, value)
         return value
 
 
 class RuleSetFile(RuleSet):
-    def __init__(self, filename, base=None, **kwargs):
-        self.filename = Path(filename)
+    def __init__(self, filename, base=None, source=None, **kwargs):
+        self.filename = self._absolute_path(filename, source)
         config = ConfigParser(default_section=None, delimiters=('=',),
                               interpolation=None)
         with self.filename.open() as file:
@@ -442,7 +485,7 @@ class RuleSetFile(RuleSet):
         name = options.pop('name', filename)
         base = options.pop('base', base)
         options.update(kwargs)    # optionally override options
-        super().__init__(name, base=base, **options)
+        super().__init__(name, base=base, source=source, **options)
         if config.has_section('VARIABLES'):
             for name, value in config.items('VARIABLES'):
                 self.variables[name] = value
@@ -454,6 +497,24 @@ class RuleSetFile(RuleSet):
             else:
                 name, classifier = section_name.strip(), None
             self.process_section(name, classifier, section_body.items())
+
+    @classmethod
+    def _absolute_path(cls, filename, source):
+        file_path = Path(filename)
+        if not file_path.is_absolute():
+            if source is None or source.root is None:
+                raise ValueError('{} path should be absolute: {}'
+                                 .format(cls.__name__, file_path))
+            file_path = source.root / file_path
+        return file_path
+
+    @property
+    def location(self):
+        return str(self.filename.resolve()), None, None
+
+    @property
+    def root(self):
+        return self.filename.parent.resolve()
 
     def process_section(self, section_name, classifier, items):
         raise NotImplementedError
@@ -467,7 +528,7 @@ class Bool(AttributeType):
         return isinstance(value, bool)
 
     @classmethod
-    def from_tokens(cls, tokens):
+    def from_tokens(cls, tokens, source):
         string = next(tokens).string
         lower_string = string.lower()
         if lower_string not in ('true', 'false'):
@@ -492,7 +553,7 @@ class Integer(AttributeType):
         return isinstance(value, int)
 
     @classmethod
-    def from_tokens(cls, tokens):
+    def from_tokens(cls, tokens, source):
         token = next(tokens)
         sign = 1
         if token.exact_type in (MINUS, PLUS):
@@ -545,9 +606,6 @@ class Var(object):
 
     def __eq__(self, other):
         return self.name == other.name
-
-    def get(self, accepted_type, rule_set):
-        return rule_set.get_variable(self.name, accepted_type)
 
 
 class VariableNotDefined(Exception):

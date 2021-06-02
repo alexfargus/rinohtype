@@ -9,9 +9,9 @@
 import re
 
 from collections import OrderedDict
+from contextlib import suppress
 from functools import partial
 from itertools import chain
-from pathlib import Path
 
 from . import styleds, reference
 from .attribute import (Bool, Integer, Attribute, AttributesDictionary,
@@ -20,16 +20,16 @@ from .attribute import (Bool, Integer, Attribute, AttributesDictionary,
                         Configurable, DefaultValueException,
                         VariableNotDefined)
 from .dimension import Dimension, CM, PT, PERCENT
-from .document import Document, Page, PageOrientation, PageType
+from .document import (Document, Page, PageOrientation, PageType,
+                       PageNumberFormat)
 from .element import create_destination
 from .image import BackgroundImage, Image
-from .flowable import Flowable
+from .flowable import Flowable, StaticGroupedFlowables
 from .language import Language, EN
 from .layout import (Container, DownExpandingContainer, UpExpandingContainer,
                      FlowablesContainer, FootnoteContainer, ChainedContainer,
                      BACKGROUND, CONTENT, HEADER_FOOTER, CHAPTER_TITLE,
                      PageBreakException, Chain)
-from .number import NumberFormat
 from .paper import Paper, A4
 from .paragraph import Paragraph
 from .reference import (Field, SECTION_NUMBER, SECTION_TITLE,
@@ -43,10 +43,11 @@ from .stylesheets import sphinx
 from .util import NamedDescriptor
 
 
-__all__ = ['SimplePage', 'TitlePage', 'PageTemplate', 'TitlePageTemplate',
-           'ContentsPartTemplate', 'FixedDocumentPartTemplate',
-           'Option', 'AbstractLocation', 'DocumentTemplate',
-           'TemplateConfiguration', 'TemplateConfigurationFile']
+__all__ = ['SimplePage', 'TitlePage', 'PageTemplate', 'PageNumberFormat',
+           'TitlePageTemplate', 'ContentsPartTemplate',
+           'FixedDocumentPartTemplate', 'Option', 'AbstractLocation',
+           'DocumentTemplate', 'TemplateConfiguration',
+           'TemplateConfigurationFile']
 
 
 class Option(Attribute):
@@ -105,11 +106,12 @@ class FlowablesList(AcceptNoneAttributeType):
         return value is None or all(isinstance(val, Flowable) for val in value)
 
     @classmethod
-    def parse_string(cls, string):
+    def parse_string(cls, string, source):
         locals = {}
         locals.update(reference.__dict__)
         locals.update(styleds.__dict__)
-        return eval(string, {'__builtins__':{}}, locals)
+        flowables = eval(string, {'__builtins__':{}}, locals)    # TODO: parse!
+        return [StaticGroupedFlowables(flowables, source=source)]
 
     @classmethod
     def doc_format(cls):
@@ -170,6 +172,13 @@ class PageBase(Page, Templated):
             self.background << background
 
 
+def try_copy(obj, parent=None):
+    try:
+        return obj.copy(parent=parent)
+    except AttributeError:
+        return obj
+
+
 class SimplePage(PageBase):
     configuration_class = PageTemplate
 
@@ -195,13 +204,13 @@ class SimplePage(PageBase):
                                                     CHAPTER_TITLE, self.body,
                                                     0, 0, height=height)
             column_top = self.chapter_title.bottom
-            header = get_option('chapter_header_text')
-            footer = get_option('chapter_footer_text')
+            header = try_copy(get_option('chapter_header_text'))
+            footer = try_copy(get_option('chapter_footer_text'))
         else:
             self.chapter_title = None
             column_top = float_space.bottom
-            header = get_option('header_text')
-            footer = get_option('footer_text')
+            header = try_copy(get_option('header_text'))
+            footer = try_copy(get_option('footer_text'))
         self.columns = [ChainedContainer('column{}'.format(i + 1), CONTENT,
                                          self.body, chain,
                                          left=i * (column_width
@@ -301,10 +310,10 @@ class DocumentPartTemplate(Template):
 
     """
 
-    page_number_format = Option(NumberFormat, 'number', "The format for page "
-                                "numbers in this document part. If it is "
-                                "different from the preceding part's number "
-                                "format, numbering restarts at 1")
+    page_number_prefix = Option(StyledText, None, 'Text to place in front of'
+                                                  'the page number.')
+    page_number_format = Option(PageNumberFormat, 'number', 'The format for '
+                                'page numbers in this document part.')
     end_at_page = Option(PageType, 'any', 'The type of page to end this '
                                           'document part on')
     drop_if_empty = Option(Bool, True, 'Exclude this part from the document '
@@ -312,7 +321,7 @@ class DocumentPartTemplate(Template):
 
     @property
     def doc_repr(self):
-        doc = ('**{}** (:class:`{}.{}`)\n\n'\
+        doc = ('**{}** (:class:`{}.{}`)\n\n'
                .format(self.name, type(self).__module__, type(self).__name__))
         for name, default_value in self.items():
             doc += '  - *{}*: ``{}``\n'.format(name, default_value)
@@ -334,10 +343,10 @@ class DocumentPartTemplate(Template):
             flowables.insert(position, flowable)
         return flowables
 
-    def document_part(self, document):
+    def document_part(self, document, last_number_format):
         flowables = self.all_flowables(document)
         if flowables or not self.drop_if_empty:
-            return DocumentPart(self, document, flowables)
+            return DocumentPart(self, document, flowables, last_number_format)
 
 
 class DocumentPart(Templated, metaclass=DocumentLocationType):
@@ -354,18 +363,19 @@ class DocumentPart(Templated, metaclass=DocumentLocationType):
 
     configuration_class = DocumentPartTemplate
 
-    def __init__(self, template, document, flowables):
+    def __init__(self, template, document, flowables, last_number_format):
         self.template = template
         self.template_name = template.name
         self.document = document
+        page_number_format = self.get_config_value('page_number_format',
+                                                   self.document)
+        self.page_number_format = (last_number_format
+                                   if page_number_format == 'continue'
+                                   else page_number_format)
         self.pages = []
         self.chain = Chain(self)
         for flowable in flowables or []:
-                self.chain << flowable
-
-    @property
-    def page_number_format(self):
-        return self.template.page_number_format
+            self.chain << flowable
 
     @property
     def number_of_pages(self):
@@ -380,18 +390,26 @@ class DocumentPart(Templated, metaclass=DocumentLocationType):
 
     def render(self, first_page_number):
         self.add_page(self.first_page(first_page_number))
-        for page_number, page in enumerate(self.pages, first_page_number + 1):
+        page_number = first_page_number
+        for page in self.pages:
+            restart = None
+            page_number += 1
             try:
                 page.render()
                 break_type = None
             except NewChapterException as nce:
                 break_type = nce.break_type
+                with suppress(ValueError):
+                    break_type, restart = break_type.split()
             except PageBreakException as pbe:
                 break_type = None
             page.place()
             if self.chain and not self.chain.done:
                 next_page_type = 'left' if page.number % 2 else 'right'
-                page = self.new_page(page_number, next_page_type == break_type)
+                next_page_breaks = next_page_type == break_type
+                if restart and next_page_breaks:
+                    page_number = 1
+                page = self.new_page(page_number, next_page_breaks)
                 self.add_page(page)     # this grows self.pages!
         next_page_type = 'right' if page_number % 2 else 'left'
         end_at_page = self.get_config_value('end_at_page', self.document)
@@ -479,36 +497,30 @@ class TemplateConfiguration(RuleSet):
     template = None
     """The :class:`.DocumentTemplate` subclass to configure"""
 
-    def __init__(self, name, base=None, template=None, description=None,
-                 **options):
+    def __init__(self, name, base=None, source=None,
+                 template=None, description=None, **options):
         if template:
             if isinstance(template, str):
                 template = DocumentTemplate.from_string(template)
             assert self.template in (None, template)
             self.template = template
-        try:
-            stylesheet_path = Path(options.get('stylesheet'))
-            if not stylesheet_path.is_absolute():
-                stylesheet_path = self._stylesheet_search_path / stylesheet_path
-            if stylesheet_path.exists():
-                options['stylesheet'] = str(stylesheet_path)
-        except TypeError:
-            pass
-        tmpl_cls = self.template
-        for attr, value in options.items():
-            options[attr] = tmpl_cls.validate_attribute(attr, value, True)
-        super().__init__(name, base=base or self.template, **options)
+        if base:
+            if isinstance(base, str):
+                base = TemplateConfigurationFile(base, source=self)
+            assert self.template in (None, base.template)
+            self.template = self.template or base.template
+        for attr, val in options.items():
+            options[attr] = self._validate_attribute(self.template, attr, val)
+        base = base or self.template
+        super().__init__(name, base=base, source=source, **options)
         self.description = description
-
-    @property
-    def _stylesheet_search_path(self):
-        return Path.cwd()
 
     def get_entries(self, name, document):
         if name in self:
             yield self[name]
         if self.base:
             yield from self.base.get_entries(name, document)
+        raise KeyError(name)
 
     def get_attribute_value(self, name):
         if name in self:
@@ -539,10 +551,6 @@ class TemplateConfiguration(RuleSet):
 class TemplateConfigurationFile(RuleSetFile, TemplateConfiguration):
 
     main_section = 'TEMPLATE_CONFIGURATION'
-
-    @property
-    def _stylesheet_search_path(self):
-        return self.filename.parent
 
     def process_section(self, section_name, classifier, items):
         if section_name in StringCollection.subclasses:
@@ -652,7 +660,7 @@ class PartsList(AttributeType, list):
         return all(isinstance(item, str) for item in value)
 
     @classmethod
-    def parse_string(cls, string):
+    def parse_string(cls, string, source):
         return cls(*string.split())
 
     @classmethod
@@ -699,8 +707,12 @@ class DocumentTemplate(Document, AttributesDictionary, Resource,
         super().__init__(document_tree, stylesheet, language, strings=strings,
                          backend=backend)
         parts = self.get_option('parts')
-        self.part_templates = [next(self._find_templates(name))
-                               for name in parts]
+        try:
+            self.part_templates = [next(self._find_templates(name))
+                                   for name in parts]
+        except KeyError as exc:
+            raise ValueError("The '{}' document template has no part named"
+                             " '{}'".format(type(self).__name__, *exc.args))
         self._to_insert = {}
 
     def _find_templates(self, name):
@@ -716,12 +728,13 @@ class DocumentTemplate(Document, AttributesDictionary, Resource,
     RE_PAGE = re.compile('^(.*)_(right|left)_page$')
 
     @classmethod
-    def get_variable(cls, variable):
+    def get_variable(cls, configuration_class, attribute, variable):
         try:
-            return cls.variables[variable.name]
+            value = cls.variables[variable.name]
         except KeyError:
             raise VariableNotDefined("Document template provides no default "
                                      "for variable '{}'".format(variable.name))
+        return configuration_class.attribute_type(attribute).validate(value)
 
     def get_option(self, option_name):
         return self.configuration.get_attribute_value(option_name)

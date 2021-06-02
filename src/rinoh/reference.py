@@ -11,16 +11,16 @@ import re
 from copy import copy
 from itertools import chain, zip_longest
 
-from .annotation import NamedDestinationLink, AnnotatedSpan
-from .attribute import Attribute, OptionSet
+from .annotation import NamedDestinationLink
+from .attribute import Attribute, Bool, OptionSet, OverrideDefault
 from .flowable import Flowable, LabeledFlowable, DummyFlowable
-from .layout import ReflowRequired, ContainerOverflow
+from .layout import ContainerOverflow
 from .number import NumberStyle, Label, format_number
 from .paragraph import Paragraph, ParagraphStyle, ParagraphBase
 from .strings import StringCollection, StringField
 from .style import HasClass, HasClasses
-from .text import (SingleStyledTextBase, MixedStyledTextBase, TextStyle,
-                   StyledText, SingleStyledText, MixedStyledText)
+from .text import (InlineStyled, StyledText, TextStyle, SingleStyledText,
+                   MixedStyledTextBase, MixedStyledText, ErrorText)
 from .util import NotImplementedAttribute
 
 
@@ -33,7 +33,7 @@ __all__ = ['Reference', 'ReferenceField', 'ReferenceText', 'ReferenceType',
 
 
 class ReferenceType(OptionSet):
-    values = 'reference', 'number', 'title', 'page'
+    values = 'reference', 'number', 'title', 'page', 'custom'
 
 
 # examples for section "3.2 Some Title"
@@ -43,90 +43,98 @@ class ReferenceType(OptionSet):
 # page:      <number of the page on which section 3.2 starts>
 
 
+class ReferenceStyle(TextStyle, NumberStyle):
+    type = Attribute(ReferenceType, ReferenceType.REFERENCE,
+                     'How the reference should be displayed')
+    link = Attribute(Bool, True, 'Create a hyperlink to the reference target')
+    quiet = Attribute(Bool, False, 'If the given reference type does not exist'
+                                   'for the target, resolve to an empty string'
+                                   'instead of making a fuss about it')
+
+
 class ReferenceBase(MixedStyledTextBase):
-    def __init__(self, type='number', link=True, quiet=False, style=None,
-                 parent=None):
-        super().__init__(style=style, parent=parent)
+    style_class = ReferenceStyle
+
+    def __init__(self, type=None, custom_title=None, style=None, parent=None,
+                 source=None):
+        super().__init__(style=style, parent=parent, source=source)
         self.type = type
-        self.link = link
-        self.quiet = quiet
+        self.custom_title = custom_title
+        if custom_title:
+            custom_title.parent = self
 
     def __str__(self):
-        result = "'{{{}}}'".format(self.type.upper())
+        result = "'{{{}}}'".format((self.type or 'none').upper())
         if self.style is not None:
             result += ' ({})'.format(self.style)
         return result
 
     def copy(self, parent=None):
-        return type(self)(self.type, self.link, self.quiet,
-                          style=self.style, parent=parent)
+        return type(self)(self.type, self.custom_title, style=self.style,
+                          parent=parent, source=self.source)
 
     def target_id(self, document):
         raise NotImplementedError
 
-    def children(self, container):
-        if container is None:
-            return '$REF({})'.format(self.type)
-        target_id = self.target_id(container.document)
-        try:
-            if self.type == ReferenceType.REFERENCE:
-                category = container.document.elements[target_id].category
-                number = container.document.get_reference(target_id, 'number')
-                text = '{}\N{No-BREAK SPACE}{}'.format(category, number)
-            elif self.type == ReferenceType.NUMBER:
-                text = container.document.get_reference(target_id, self.type)
-                if text is None:
-                    if not self.quiet:
-                        self.warn('Cannot reference "{}"'.format(target_id),
-                                  container)
-                    text = ''
-            elif self.type == ReferenceType.PAGE:
-                try:
-                    text = str(container.document.page_references[target_id])
-                except KeyError:
-                    text = '??'
-            elif self.type == ReferenceType.TITLE:
-                text = container.document.get_reference(target_id, self.type)
-            else:
-                raise NotImplementedError(self.type)
-        except KeyError:
-            self.warn("Unknown label '{}'".format(target_id), container)
-            text = "??".format(target_id)
-        # TODO: clean up
-        if isinstance(text, MixedStyledTextBase):
-            for child in text.children(container):
-                child_copy = copy(child)
-                child_copy.parent = self
-                yield child_copy
-        elif isinstance(text, SingleStyledTextBase):
-            yield text
-        else:
-            yield SingleStyledText(text, parent=self)
+    def is_title_reference(self, container):
+        reference_type = self.type or self.get_style('type', container)
+        return reference_type == ReferenceType.TITLE
 
-    def spans(self, container):
-        spans = super().spans(container)
-        if self.link:
+    def children(self, container, type=None):
+        document = container.document
+        type = type or self.type or self.get_style('type', container)
+        if container is None:
+            return '$REF({})'.format(type)
+        target_id = self.target_id(document)
+        if type == ReferenceType.CUSTOM:
+            yield self.custom_title
+            return
+        try:
+            text = document.get_reference(target_id, type)
+        except KeyError:
+            if self.custom_title:
+                text = self.custom_title
+            elif self.get_style('quiet', container):
+                text = ''
+            else:
+                self.warn(f"Target '{target_id}' has no '{type}' reference",
+                          container)
+                text = ErrorText('??', parent=self)
+        if type == ReferenceType.TITLE:     # prevent infinite recursion
+            document.title_targets.update(self.referenceable_ids)
+            if target_id in document.title_targets:
+                self.warn("Circular 'title' reference replaced with "
+                          "'reference' reference", container)
+                yield from self.children(container, type='reference')
+                return
+            document.title_targets.add(target_id)
+        yield (text.copy(parent=self) if isinstance(text, InlineStyled)
+               else SingleStyledText(text, parent=self))
+        document.title_targets.clear()
+
+    def get_annotation(self, container):
+        assert self.annotation is None
+        if self.get_style('link', container):
             target_id = self.target_id(container.document)
-            annotation = NamedDestinationLink(str(target_id))
-            spans = (AnnotatedSpan(span, annotation) for span in spans)
-        return spans
+            return NamedDestinationLink(str(target_id))
 
 
 class Reference(ReferenceBase):
-    def __init__(self, target_id, type='number', link=True, style=None,
-                 quiet=False, **kwargs):
-        super().__init__(type=type, link=link, style=style, quiet=quiet,
-                         **kwargs)
+    def __init__(self, target_id, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self._target_id = target_id
+
+    def copy(self, parent=None):
+        return type(self)(self._target_id, self.type, self.custom_title,
+                          style=self.style, parent=parent, source=self.source)
 
     def target_id(self, document):
         return self._target_id
 
 
 class DirectReference(ReferenceBase):
-    def __init__(self, referenceable, type='number', link=False, style=None,
-                 **kwargs):
-        super().__init__(type=type, link=link, style=style, **kwargs)
+    def __init__(self, referenceable, type='number', **kwargs):
+        super().__init__(type=type, **kwargs)
         self.referenceable = referenceable
 
     def target_id(self, document):
@@ -194,6 +202,18 @@ class ReferencingParagraph(ParagraphBase):
         """Filter selection on a set of classes of the target flowable"""
         return HasClasses(self._target_flowable(document))
 
+    def target_is_of_type(self, document):
+        """Filter selection on the type of the target flowable"""
+        return IsOfType(self._target_flowable(document))
+
+
+class IsOfType:
+    def __init__(self, styled):
+        self.styled = styled
+
+    def __eq__(self, type_name):
+        return type_name == type(self.styled).__name__
+
 
 class Note(LabeledFlowable):
     category = 'Note'
@@ -212,15 +232,14 @@ class RegisterNote(DummyFlowable):
         self.note.prepare(flowable_target)
 
 
-class NoteMarkerStyle(TextStyle, NumberStyle):
-    pass
+class NoteMarkerStyle(ReferenceStyle):
+    type = OverrideDefault(ReferenceType.NUMBER)
 
 
 class NoteMarkerBase(ReferenceBase, Label):
     style_class = NoteMarkerStyle
 
     def __init__(self, custom_label=None, **kwargs):
-        kwargs.update(type='number', link=True)
         super().__init__(**kwargs)
         Label.__init__(self, custom_label=custom_label)
 
@@ -317,6 +336,9 @@ class SectionFieldType(FieldTypeBase, metaclass=SectionFieldTypeMeta):
     def __eq__(self, other):
         return type(self) == type(other) and self.__dict__ == other.__dict__
 
+    def __str__(self):
+        return '{{{key}({level})}}'.format(key=self.key, level=self.level)
+
     def __repr__(self):
         return "{}({})".format(type(self).__name__, self.level)
 
@@ -347,8 +369,8 @@ RE_STRINGFIELD = ('|'.join(r'{}\.(?:[a-z_][a-z0-9_]*)'
 
 
 class Field(MixedStyledTextBase):
-    def __init__(self, type, style=None):
-        super().__init__(style=style)
+    def __init__(self, type, id=None, style=None, parent=None, source=None):
+        super().__init__(id=id, style=style, parent=parent, source=source)
         self.type = type
 
     def __str__(self):
@@ -358,7 +380,7 @@ class Field(MixedStyledTextBase):
         return result
 
     def __repr__(self):
-        return "{0}({1})".format(self.__class__.__name__, self.type)
+        return "{0}({1})".format(self.__class__.__name__, repr(self.type))
 
     @classmethod
     def parse_string(cls, string, style=None):
@@ -367,6 +389,10 @@ class Field(MixedStyledTextBase):
         except KeyError:
             field = SectionFieldType.from_string(string)
         return cls(field, style=style)
+
+    def copy(self, parent=None):
+        return type(self)(self.type, style=self.style, parent=parent,
+                          source=self.source)
 
     def children(self, container):
         if container is None:
@@ -387,8 +413,8 @@ class Field(MixedStyledTextBase):
             section = container.page.get_current_section(self.type.level)
             section_id = section.get_id(doc) if section else None
             if section_id:
-                text = (doc.get_reference(section_id, self.type.reference_type)\
-                        or '\N{ZERO WIDTH SPACE}')
+                text = doc.get_reference(section_id, self.type.reference_type,
+                                         '\N{ZERO WIDTH SPACE}')
             else:
                 text = '\N{ZERO WIDTH SPACE}'
         else:

@@ -6,6 +6,7 @@
 # Public License v3. See the LICENSE file or http://www.gnu.org/licenses/.
 
 
+from contextlib import suppress
 from itertools import chain, takewhile
 
 from .attribute import Attribute, Bool, Integer, OverrideDefault
@@ -16,16 +17,14 @@ from .flowable import LabeledFlowable, GroupedLabeledFlowables
 from .flowable import Flowable, FlowableStyle, GroupedFlowablesStyle
 from .layout import PageBreakException
 from .number import NumberStyle, Label, LabelStyle, format_number
-from .number import NumberedParagraph, NumberedParagraphStyle
-from .paragraph import ParagraphStyle, ParagraphBase, Paragraph
+from .paragraph import (ParagraphBase, StaticParagraph, Paragraph,
+                        ParagraphStyle)
 from .reference import (ReferenceField, ReferencingParagraph,
                         ReferencingParagraphStyle)
-from .reference import ReferenceType
 from .text import StyledText, SingleStyledText, MixedStyledText, Tab
 from .style import PARENT_STYLE
 from .strings import StringCollection, String, StringField
 from .util import NotImplementedAttribute, itemcount
-
 
 __all__ = ['Section', 'Heading',
            'ListStyle', 'List', 'ListItem', 'ListItemLabel', 'DefinitionList',
@@ -33,7 +32,7 @@ __all__ = ['Section', 'Heading',
            'TableOfContentsSection', 'TableOfContentsStyle', 'TableOfContents',
            'ListOfStyle',
            'TableOfContentsEntry', 'Admonition', 'AdmonitionStyle',
-           'HorizontalRule', 'HorizontalRuleStyle', 'SupportingMatter']
+           'HorizontalRule', 'HorizontalRuleStyle', 'OutOfLineFlowables']
 
 
 class SectionTitles(StringCollection):
@@ -95,75 +94,29 @@ class Section(StaticGroupedFlowables, SectionBase):
     """
 
 
-class HeadingStyle(NumberedParagraphStyle):
-    number_separator = Attribute(StyledText, '.',
-                                 "Characters inserted between the number "
-                                 "label of the parent section and this "
-                                 "section. If ``None``, only show this "
-                                 "section's number label.")
+class HeadingStyle(ParagraphStyle):
     keep_with_next = OverrideDefault(True)
+    numbering_level = OverrideDefault(-1)
 
 
-class Heading(NumberedParagraph):
+class Heading(StaticParagraph):
     """The title for a section
 
     Args:
-        title (StyledText): the title text
-        custom_label (StyledText): a frontend can supply a custom label to use
-            instead of an automatically determined section number
+        title (StyledText): this heading's text
 
     """
 
     style_class = HeadingStyle
-
-    def __init__(self, title, custom_label=None,
-                 id=None, style=None, parent=None):
-        super().__init__(title, id=id, style=style, parent=parent)
-        self.custom_label = custom_label
+    has_title = True
 
     @property
     def referenceable(self):
         return self.section
 
-    def __repr__(self):
-        return '{}({}) (style={})'.format(self.__class__.__name__,
-                                          self.content, self.style)
-
-    def prepare(self, flowable_target):
-        document = flowable_target.document
-        document._sections.append(self.section)
-        section_id = self.section.get_id(document)
-        numbering_style = self.get_style('number_format', flowable_target)
-        if self.get_style('custom_label', flowable_target):
-            assert self.custom_label is not None
-            label = str(self.custom_label)
-        elif numbering_style:
-            try:
-                parent_section_id = self.section.parent.section.get_id(document)
-            except AttributeError:
-                parent_section_id = None
-            ref_category = self.referenceable.category
-            section_counters = document.counters.setdefault(ref_category, {})
-            section_counter = section_counters.setdefault(parent_section_id, [])
-            section_counter.append(self)
-            number = len(section_counter)
-            label = format_number(number, numbering_style)
-            separator = self.get_style('number_separator', flowable_target)
-            if separator is not None and self.level > 1:
-                parent_id = self.section.parent.section.get_id(document)
-                parent_ref = document.get_reference(parent_id, 'number')
-                if parent_ref:
-                    separator_string = separator.to_string(flowable_target)
-                    label = parent_ref + separator_string + label
-        else:
-            label = None
-        title_string = self.content.to_string(flowable_target)
-        document.set_reference(section_id, ReferenceType.NUMBER, label)
-        document.set_reference(section_id, ReferenceType.TITLE, title_string)
-
-    def text(self, container):
-        number = self.number(container)
-        return MixedStyledText(number + self.content, parent=self)
+    def prepare(self, container):
+        super().prepare(container)
+        container.document._sections.append(self.section)
 
     def flow(self, container, last_descender, state=None, **kwargs):
         if self.level == 1 and container.page.chapter_title:
@@ -228,11 +181,11 @@ class DefinitionList(GroupedLabeledFlowables, StaticGroupedFlowables):
     pass
 
 
-class Header(Paragraph):
+class Header(StaticParagraph):
     pass
 
 
-class Footer(Paragraph):
+class Footer(StaticParagraph):
     pass
 
 
@@ -437,11 +390,12 @@ class Admonition(StaticGroupedFlowables):
 
     def title(self, document):
         return (self.custom_title
-                or document.get_string(AdmonitionTitles,
-                                       self.admonition_type))
+                or document.get_string(AdmonitionTitles, self.admonition_type))
 
     def flowables(self, container):
         title = self.title(container.document)
+        with suppress(AttributeError):
+            title = title.copy()
         flowables = super().flowables(container)
         first_flowable = next(flowables)
         inline_title = self.get_style('inline_title', container)
@@ -449,7 +403,8 @@ class Admonition(StaticGroupedFlowables):
             title = MixedStyledText(title, style='inline title')
             kwargs = dict(id=first_flowable.id, style=first_flowable.style,
                           parent=self)
-            paragraph = Paragraph(title + ' ' + first_flowable, **kwargs)
+            title_plus_content = title + ' ' + first_flowable.content
+            paragraph = Paragraph(title_plus_content, **kwargs)
             paragraph.secondary_ids = first_flowable.secondary_ids
             yield paragraph
         else:
@@ -468,15 +423,17 @@ class HorizontalRule(Flowable):
 
     def render(self, container, descender, state, **kwargs):
         width = float(container.width)
-        line = Line((0, 0), (width, 0), style=PARENT_STYLE, parent=self)
+        line = Line((0, 0), (width, 0), parent=self)
         line.render(container)
         return width, 0, 0
 
 
-class SupportingMatter(SectionBase):
-    def __init__(self, id, align=None, width=None, style=None, parent=None):
-        super().__init__(id=id, align=align, width=width, style=style,
+class OutOfLineFlowables(GroupedFlowables):
+    def __init__(self, name, align=None, width=None, id=None, style=None,
+                 parent=None):
+        super().__init__(align=align, width=width, id=id, style=style,
                          parent=parent)
+        self.name = name
 
     def flowables(self, container):
-        return container.document.supporting_matter[self.id]
+        return container.document.supporting_matter[self.name]

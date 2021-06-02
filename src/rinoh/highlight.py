@@ -8,11 +8,12 @@
 from distutils.version import LooseVersion
 
 from .color import HexColor
-from .flowable import StaticGroupedFlowables
+from .flowable import (StaticGroupedFlowables, GroupedFlowablesStyle,
+                       Float, FloatStyle)
 from .font.style import FontWeight, FontSlant
 from .paragraph import Paragraph
 from .style import StyledMatcher, StyleSheet
-from .text import SingleStyledText, TextStyle
+from .text import SingleStyledText, MixedStyledText, TextStyle
 from .util import VersionError
 from .warnings import warn
 
@@ -52,7 +53,12 @@ class CodeBlock(Paragraph):
         super().__init__(text, id=id, style=style, parent=parent)
 
 
-class CodeBlockWithCaption(StaticGroupedFlowables):
+class CodeBlockWithCaptionStyle(FloatStyle, GroupedFlowablesStyle):
+    pass
+
+
+class CodeBlockWithCaption(Float, StaticGroupedFlowables):
+    style_class = CodeBlockWithCaptionStyle
     category = 'Listing'
 
 
@@ -73,7 +79,7 @@ def highlight_block(language, text, lexer_getter):
                  'Highlighting skipped.' % language)
         else:
             raise exc
-    return text
+    return MixedStyledText(text)
 
 
 class Token(SingleStyledText):

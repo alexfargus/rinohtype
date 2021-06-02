@@ -11,9 +11,10 @@ import pytest
 from rinoh.attribute import OptionSet, Bool, Integer, ParseError
 from rinoh.color import Color, HexColor
 from rinoh.dimension import (Dimension, PT, PICA, INCH, MM, CM,
-                             PERCENT, QUARTERS)
+                             PERCENT, HALVES, QUARTERS)
 from rinoh.draw import Stroke
 from rinoh.flowable import FlowableWidth, HorizontalAlignment, Break
+from rinoh.font.style import ClassSet, FontWeight, FontSlant, FontWidth
 from rinoh.image import BackgroundImage, Scale, InlineImage
 from rinoh.number import NumberFormat
 from rinoh.paper import Paper, A4, A5, JUNIOR_LEGAL
@@ -35,13 +36,17 @@ def test_optionset_from_string():
     ONE = 'one'
     TWO = 'two'
     THREE = 'three'
+    WITH_SPACE = 'with space'
+    DOUBLE_SPACE = 'double  space'
 
     class TestSet1(OptionSet):
-        values = ONE, TWO, THREE
+        values = ONE, TWO, THREE, WITH_SPACE, DOUBLE_SPACE
 
     assert TestSet1.from_string('one') == ONE
     assert TestSet1.from_string('TWO') == TWO
     assert TestSet1.from_string('tHRee') == THREE
+    assert TestSet1.from_string('With Space') == WITH_SPACE
+    assert TestSet1.from_string('double  SPACE') == DOUBLE_SPACE
     with pytest.raises(ValueError):
         TestSet1.from_string('four')
     with pytest.raises(ValueError):
@@ -60,6 +65,62 @@ def test_optionset_from_string():
         TestSet2.from_string('False')
 
 
+def test_classset_from_string():
+    class TestClassSet(ClassSet):
+        classes = {
+            1: ['one', 'uno'],
+            3: ['number three', 'tres'],
+            4: ['four', 'numero-quattro']
+        }
+
+    assert TestClassSet.from_string('one') == 1
+    assert TestClassSet.from_string('uNo') == 1
+    assert TestClassSet.from_string('number Three') == 3
+    assert TestClassSet.from_string('tres') == 3
+    assert TestClassSet.from_string('fOUr') == 4
+    assert TestClassSet.from_string('numero-quattro') == 4
+    assert TestClassSet.from_string('numero quattro') == 4
+    assert TestClassSet.from_string('Numero Quattro') == 4
+    assert TestClassSet.from_string('numeroquattro') == 4
+    assert TestClassSet.from_string('numeroQuattro') == 4
+    with pytest.raises(ValueError):
+        TestClassSet.from_string('number-three')
+
+
+def test_fontweight_from_string():
+    assert FontWeight.from_string('regular') == FontWeight.REGULAR
+    assert FontWeight.from_string('normal') == FontWeight.REGULAR
+    assert FontWeight.from_string('semibold') == FontWeight.SEMI_BOLD
+    assert FontWeight.from_string('semi-bold') == FontWeight.SEMI_BOLD
+    assert FontWeight.from_string('semi bold') == FontWeight.SEMI_BOLD
+    assert FontWeight.from_string('400') == FontWeight.REGULAR
+    assert FontWeight.from_string('123') == 123
+    with pytest.raises(ValueError):
+        FontWeight.from_string('1299')
+
+
+def test_fontslant_from_string():
+    assert FontSlant.from_string('upright') == FontSlant.UPRIGHT
+    assert FontSlant.from_string('obLIQUE') == FontSlant.OBLIQUE
+    assert FontSlant.from_string('Italic') == FontSlant.ITALIC
+    with pytest.raises(ValueError):
+        FontSlant.from_string('somewhat-oblique')
+
+
+def test_fontwidth_from_string():
+    assert FontWidth.from_string('normal') == FontWidth.NORMAL
+    assert FontWidth.from_string('Medium') == FontWidth.MEDIUM
+    assert FontWidth.from_string('condenSED') == FontWidth.CONDENSED
+    assert FontWidth.from_string('semi-expanded') == FontWidth.SEMI_EXPANDED
+    assert FontWidth.from_string('ultra eXpanded') == FontWidth.ULTRA_EXPANDED
+    assert FontWidth.from_string('UltraCondensed') == FontWidth.ULTRA_CONDENSED
+    assert FontWidth.from_string('5') == FontWidth.NORMAL
+    with pytest.raises(ValueError):
+        FontWidth.from_string('0')
+    with pytest.raises(ValueError):
+        FontWidth.from_string('11')
+
+
 def test_numberformat_from_string():
     assert NumberFormat.from_string('none') == None
     assert NumberFormat.from_string('number') == NumberFormat.NUMBER
@@ -72,6 +133,12 @@ def test_numberformat_from_string():
     assert NumberFormat.from_string('uppercase roman') \
                == NumberFormat.UPPERCASE_ROMAN
     assert NumberFormat.from_string('sYMBOl') == NumberFormat.SYMBOL
+    assert NumberFormat.from_string("'1'") == SingleStyledText('1')
+    assert NumberFormat.from_string("'2' (strong)") \
+               == SingleStyledText('2', style='strong')
+    assert NumberFormat.from_string("'3' (strong) 'A'") \
+               == MixedStyledText([SingleStyledText('3', style='strong'),
+                                   SingleStyledText('A')])
     with pytest.raises(ValueError):
         NumberFormat.from_string('Character')
     with pytest.raises(ValueError):
@@ -110,6 +177,9 @@ def test_break_from_string():
     assert Break.from_string('Left') == Break.LEFT
     assert Break.from_string('RIGHT') == Break.RIGHT
     assert Break.from_string('aNY') == Break.ANY
+    assert Break.from_string('LEFT restart') == Break.LEFT_RESTART
+    assert Break.from_string('riGHt REstarT') == Break.RIGHT_RESTART
+    assert Break.from_string('any RESTART') == Break.ANY_RESTART
     with pytest.raises(ValueError):
         assert Break.from_string('center')
 
@@ -200,8 +270,10 @@ def test_dimension_from_string():
     assert Dimension.from_string('-2.1 cm') == -2.1*CM
     assert Dimension.from_string('21%') == 21*PERCENT
     assert Dimension.from_string('-16.12%') == -16.12*PERCENT
+    assert Dimension.from_string('1/2') == 1*HALVES
+    assert Dimension.from_string('3/2') == 3*HALVES
     assert Dimension.from_string('3/4') == 3*QUARTERS
-    with pytest.raises(ValueError):
+    with pytest.raises(ParseError):
         assert Dimension.from_string('20inch')
 
 
@@ -388,14 +460,26 @@ def test_backgroundimage_from_string():
 
 
 def test_column_widths_from_string():
-    assert ColumnWidths.from_string('none') == None
+    assert ColumnWidths.from_string('none') is None
+    assert ColumnWidths.from_string('auto') == [None]
     assert ColumnWidths.from_string('1 2 3') == [1, 2, 3]
     assert ColumnWidths.from_string('1 0 9') == [1, 0, 9]
     assert ColumnWidths.from_string('2      4  6') == [2, 4, 6]
     assert ColumnWidths.from_string('6  5   4   ') == [6, 5, 4]
     assert ColumnWidths.from_string('1pt 2cm 3in') == [1*PT, 2*CM, 3*INCH]
+    assert ColumnWidths.from_string('20% 30%') == [20*PERCENT, 30*PERCENT]
+    assert ColumnWidths.from_string('1/2 3/4') == [1*HALVES, 3*QUARTERS]
+    assert ColumnWidths.from_string('1/2 auto 20%') == [1*HALVES, None,
+                                                        20*PERCENT]
     assert ColumnWidths.from_string('4 pt 5 cm 6 in') == [4*PT, 5*CM, 6*INCH]
     assert ColumnWidths.from_string('7pt 8 cm 9in') == [7*PT, 8*CM, 9*INCH]
+    assert ColumnWidths.from_string('10 20 1cm 30') == [10, 20, 1*CM, 30]
+    assert ColumnWidths.from_string('1 2cm auto') == [1, 2*CM, None]
+    assert ColumnWidths.from_string('2 auto 5') == [2, None, 5]
+    with pytest.raises(ParseError):
+        assert ColumnWidths.from_string('autoo')
+    with pytest.raises(ParseError):
+        assert ColumnWidths.from_string('1 none')
     with pytest.raises(ParseError):
         assert ColumnWidths.from_string('1.5 3 1cm')
 

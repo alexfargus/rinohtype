@@ -1,155 +1,205 @@
-name: Tests
+name: Test & Publish
 
 on:
   push:
+    branches: [ master ]
+    tags:
+      - '*'
   pull_request:
     branches: [ master ]
+  workflow_dispatch:
 
+env:
+  current_python: '3.9'
+  poetry_version: '1.1.6'
+  nox_cmd: 'nox --verbose --error-on-missing-interpreters --session'
 jobs:
   check:
-    name: ${{ matrix.os }} / ${{ matrix.python-version }} ${{ matrix.env.TOXENV }}
+    name: ${{ matrix.env.NOXENV }}
     runs-on: ${{ matrix.os }}-latest
     strategy:
       fail-fast: false
       matrix:
         os: [Ubuntu]
-        python-version: [3.8]
         env:
-          - TOXENV: check
-          - TOXENV: check-docs
-          - TOXENV: build-docs
+          - NOXENV: check
+          - NOXENV: check_docs
+          - NOXENV: build_docs
     env: ${{ matrix.env}}
     steps:
     - uses: actions/checkout@v2
       with:
         submodules: true
-    - name: Set up Python
+    - name: Install Python ${{ env.current_python }}
       uses: actions/setup-python@v2
       with:
-        python-version: 3.8
-    - name: Get full Python version
-      id: full-python-version
-      run: python -c "import sys; print('::set-output name=version::' + '-'.join(str(v) for v in sys.version_info))"
-
-    - name: Install Poetry
-      uses: Gr1N/setup-poetry@v4
-      with:
-        poetry-version: 1.0.10
-    - name: Cache Poetry venv
-      uses: actions/cache@v2
-      with:
-        path: .venv
-        key: ${{ runner.os }}-venv-${{ steps.full-python-version.outputs.version }}-${{ hashFiles('**/poetry.lock') }}
-
-    - name: Install development dependencies
+        python-version: ${{ env.current_python }}
+    - name: Install Nox & co
       run: |
-        poetry install -vv --no-root
+        pip${{ env.current_python }} install poetry==${{ env.poetry_version }}
+        poetry export --dev --without-hashes --output requirements.txt
+        pip${{ env.current_python }} install --constraint requirements.txt nox nox-poetry
 
     - name: Cache docs references cache
-      if: env.TOXENV == 'build-docs'
+      if: env.NOXENV == 'build_docs'
       uses: actions/cache@v2
       with:
-        path: doc/_build/rinoh/rinohtype.rtc
-        key: ${{ env.TOXENV }}-references-${{ hashFiles('doc/_build/rinoh/rinohtype.rtc') }}
+        path: doc/_build/rinoh/*.rtc
+        key: ${{ env.NOXENV }}-references-${{ hashFiles('doc/_build/rinoh/*.rtc') }}
         restore-keys: |
-          ${{ env.TOXENV }}-references-
+          ${{ env.NOXENV }}-references-
 
-    - name: Run tox
-      run: |
-        poetry run tox -v
+    - name: Run Nox
+      run: ${{ env.nox_cmd }} ${{ env.NOXENV }}
 
-  test:
-    name: ${{ matrix.os }} / ${{ matrix.python-version }} unit tests (${{ matrix.env.DIST }})
+    - name: Determine directory to publish docs to
+      id: docs-publish-dir
+      if: env.NOXENV == 'build_docs'
+      uses: jannekem/run-python-script-action@v1
+      with:
+        script: |
+          import os, re
+          github_ref = os.environ.get('GITHUB_REF')
+          m = re.match(r'^refs/tags/v([0-9]+\.[0-9]+\.[0-9]+(-dev\.[0-9]+)?)$',
+                       github_ref)
+          if m:
+              target = m.group(1)
+          elif github_ref == 'refs/heads/master':
+              target = 'master'
+          else:
+              target = ''
+          set_output('target', target)
+    - name: Publish docs to GitHub pages
+      if: env.NOXENV == 'build_docs' && steps.docs-publish-dir.outputs.target != ''
+      uses: peaceiris/actions-gh-pages@v3
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: doc/_build/html
+        destination_dir: ${{ steps.docs-publish-dir.outputs.target }}
+        keep_files: false
+    outputs:
+      docs-target: ${{ steps.docs-publish-dir.outputs.target }}
+
+  docs-versions:
+    name: Update docs versions JSON
+    needs: check
+    if: needs.check.outputs.docs-target != ''
+    runs-on: Ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        ref: gh-pages
+    - name: Write versions to JSON file
+      uses: jannekem/run-python-script-action@v1
+      with:
+        script: |
+          import json
+          from pathlib import Path
+
+          cwd = Path.cwd()
+          versions = sorted((item.name for item in cwd.iterdir()
+                             if item.is_dir() and not item.name.startswith('.')),
+                            reverse=True)
+          target_dir = Path('gh-pages')
+          target_dir.mkdir(parents=True)
+          target_file = target_dir / 'versions.json'
+          with target_file.open('w') as f:
+              json.dump(versions, f)
+
+    - name: Publish versions JSON to GitHub pages
+      uses: peaceiris/actions-gh-pages@v3
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: gh-pages
+        keep_files: true
+
+  unit:
+    name: ${{ matrix.os }} / ${{ matrix.python-version }} unit tests${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
         os: [Ubuntu, MacOS, Windows]
-        python-version: [3.6, 3.7, 3.8, 3.9.0-alpha - 3.9.0, pypy3]
-        env:
-          - DIST: sdist
-            WITH_COVERAGE: 1
-          - DIST: wheel
-            WITH_COVERAGE: 0
+        python-version: [3.6, 3.7, 3.8, 3.9, 3.10.0-alpha - 3.10, pypy-3.6, pypy-3.7]
+        noxenv: [unit]
+        cov: [1]
+        name: [""]
+        include:
+          - { os: Ubuntu, python-version: 3.9, noxenv: unit_sphinx, cov: 0, name: " (Sphinx)" }
     runs-on: ${{ matrix.os }}-latest
-    env: ${{ matrix.env}}
+    env:
+      NOXENV: ${{ matrix.noxenv }}
+      WITH_COVERAGE: ${{ matrix.cov }}
     steps:
     - uses: actions/checkout@v2
-    - name: Set up Python ${{ matrix.python-version }}
+    - name: Install Python ${{ env.current_python }}
+      uses: actions/setup-python@v2
+      with:
+        python-version: ${{ env.current_python }}
+    - name: Install Nox & co
+      run: |
+        pip${{ env.current_python }} install poetry==${{ env.poetry_version }}
+        poetry export --dev --without-hashes --output requirements.txt
+        pip${{ env.current_python }} install --constraint requirements.txt nox nox-poetry
+    - name: Install Python ${{ matrix.python-version }}
+      if: matrix.python-version != env.current_python
       uses: actions/setup-python@v2
       with:
         python-version: ${{ matrix.python-version }}
-    - name: Get full Python version
-      id: full-python-version
-      run: python -c "import sys; print('::set-output name=version::' + '-'.join(str(v) for v in sys.version_info))"
+    - name: Set NOXENV for Python ${{ matrix.python-version }}
+      run: python .github/workflows/noxpy.py "${{ matrix.python-version }}"
 
-    - name: Install Poetry
-      uses: Gr1N/setup-poetry@v4
-      with:
-        poetry-version: 1.0.10
-    - name: Cache Poetry venv
-      uses: actions/cache@v2
-      with:
-        path: .venv
-        key: ${{ runner.os }}-venv-${{ steps.full-python-version.outputs.version }}-${{ hashFiles('**/poetry.lock') }}
-
-    - name: Install development dependencies
-      run: |
-        poetry install -vv --no-root
-
-    - name: Create wheel
-      if: env.DIST == 'wheel'
-      run: |
-        poetry run python setup.py bdist_wheel
-        python -c "import os; from pathlib import Path; open(os.getenv('GITHUB_ENV'), 'a').write('INSTALLPKG=--installpkg ' + str(next(Path('dist').glob('*.whl'))))"
-    - name: Run tox
-      run: |
-        poetry run tox -v ${{ env.INSTALLPKG }} -- -s
+    - name: Run Nox
+      continue-on-error: ${{ startsWith(matrix.python-version, 'pypy') }}
+                        # https://github.com/pytest-dev/pytest-xdist/issues/622
+      run: ${{ env.nox_cmd }} ${{ env.NOXENV }} -- -s
 
     - name: Upload coverage statistics to codecov.io
       if: env.WITH_COVERAGE == 1
       shell: bash
       run: |
-        bash <(curl -s https://codecov.io/bash) -f coverage.xml -F unittests,${{ matrix.python-version }},${{ runner.os }}
+        bash <(curl -s https://codecov.io/bash) -f coverage.xml -F ${{ env.NOXENV }},${{ matrix.python-version }},${{ runner.os }}
 
   regression:
-    name: ${{ matrix.os }} / ${{ matrix.python-version }} regression tests (${{ matrix.dist }})
+    name: ${{ matrix.os }} / ${{ matrix.python-version }} regression tests${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
         os: [Ubuntu, MacOS, Windows]
-        python-version: [3.8]
-        dist: [wheel]
+        python-version: [3.9]
+        noxenv: [regression]
+        cov: [1]
+        name: [""]
         include:
-          - { os: Ubuntu, dist: wheel, python-version: 3.6 }
-          - { os: Ubuntu, dist: wheel, python-version: 3.7 }
-          - { os: Ubuntu, dist: wheel, python-version: 3.9.0-alpha - 3.9.0 }
-          - { os: Ubuntu, dist: wheel, python-version: pypy3 }
+          - { os: Ubuntu, python-version: 3.6, noxenv: regression, cov: 1 }
+          - { os: Ubuntu, python-version: 3.7, noxenv: regression, cov: 1 }
+          - { os: Ubuntu, python-version: 3.8, noxenv: regression, cov: 1 }
+          - { os: Ubuntu, python-version: pypy-3.6, noxenv: regression, cov: 1 }
+          - { os: Ubuntu, python-version: pypy-3.7, noxenv: regression, cov: 1 }
+          - { os: Ubuntu, python-version: 3.9, noxenv: regression_docutils, cov: 0, name: " (docutils)" }
+          - { os: Ubuntu, python-version: 3.9, noxenv: regression_sphinx, cov: 0, name: " (Sphinx)" }
     runs-on: ${{ matrix.os }}-latest
     env:
-      TOXENV: regression
-      DIST: ${{ matrix.dist }}
-      WITH_COVERAGE: 1
+      NOXENV: ${{ matrix.noxenv }}
+      WITH_COVERAGE: ${{ matrix.cov }}
       MUPDF_VERSION: 1.18.0
-      IMAGEMAGICK_VERSION: 7.0.10.29
     steps:
     - uses: actions/checkout@v2
-    - name: Set up Python ${{ matrix.python-version }}
+    - name: Install Python ${{ env.current_python }}
+      uses: actions/setup-python@v2
+      with:
+        python-version: ${{ env.current_python }}
+    - name: Install Nox & co
+      run: |
+        pip${{ env.current_python }} install poetry==${{ env.poetry_version }}
+        poetry export --dev --without-hashes --output requirements.txt
+        pip${{ env.current_python }} install --constraint requirements.txt nox nox-poetry
+    - name: Install Python ${{ matrix.python-version }}
+      if: matrix.python-version != env.current_python
       uses: actions/setup-python@v2
       with:
         python-version: ${{ matrix.python-version }}
-    - name: Get full Python version
-      id: full-python-version
-      run: python -c "import sys; print('::set-output name=version::' + '-'.join(str(v) for v in sys.version_info))"
-
-    - name: Install Poetry
-      uses: Gr1N/setup-poetry@v4
-      with:
-        poetry-version: 1.0.10
-    - name: Cache Poetry venv
-      uses: actions/cache@v2
-      with:
-        path: .venv
-        key: ${{ runner.os }}-venv-${{ steps.full-python-version.outputs.version }}-${{ hashFiles('**/poetry.lock') }}
+    - name: Set NOXENV for Python ${{ matrix.python-version }}
+      run: python .github/workflows/noxpy.py "${{ matrix.python-version }}"
 
     - name: Get Homebrew cache dir (macOS)
       id: cache-dirs-macos
@@ -187,11 +237,8 @@ jobs:
       uses: actions/cache@v2
       with:
         path: ${{ steps.cache-dirs-windows.outputs.dir }}
-        key: ${{ runner.os }}-chocolatey-mupdf${{ env.MUPDF_VERSION}}-im${{ env.IMAGEMAGICK_VERSION }}
+        key: ${{ runner.os }}-chocolatey-mupdf${{ env.MUPDF_VERSION}}
 
-    - name: Install development dependencies
-      run: |
-        poetry install -vv --no-root
     - name: Install tools required by the regression tests (Linux)
       if: startsWith(runner.os, 'Linux')
       run: |
@@ -204,19 +251,117 @@ jobs:
       if: startsWith(runner.os, 'Windows')
       run: |
         choco install mupdf --version=${{ env.MUPDF_VERSION}}
-        choco install imagemagick.tool --version=${{ env.IMAGEMAGICK_VERSION }}
+        choco install imagemagick.tool
 
-    - name: Create wheel
-      if: env.DIST == 'wheel'
-      run: |
-        poetry run python setup.py bdist_wheel
-        python -c "import os; from pathlib import Path; open(os.getenv('GITHUB_ENV'), 'a').write('INSTALLPKG=--installpkg ' + str(next(Path('dist').glob('*.whl'))))"
-    - name: Run tox
-      run: |
-        poetry run tox -v ${{ env.INSTALLPKG }} -- -s
+    - name: Run Nox
+      # https://github.com/pytest-dev/pytest-xdist/issues/622
+      continue-on-error: ${{ runner.os == 'Linux'
+                             && startsWith(matrix.python-version, 'pypy') }}
+      run: ${{ env.nox_cmd }} ${{ env.NOXENV }} -- -s
 
     - name: Upload coverage statistics to codecov.io
       if: env.WITH_COVERAGE == 1
       shell: bash
       run: |
-        bash <(curl -s https://codecov.io/bash) -f coverage.xml -F ${{ env.TOXENV }},${{ matrix.python-version }},${{ runner.os }}
+        bash <(curl -s https://codecov.io/bash) -f coverage.xml -F ${{ env.NOXENV }},${{ matrix.python-version }},${{ runner.os }}
+
+  check-tag:
+    needs: [check, unit, regression]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        submodules: true
+    - name: Get tag
+      uses: olegtarasov/get-tag@v2.1
+    - name: Install Python ${{ env.current_python }}
+      uses: actions/setup-python@v2
+      with:
+        python-version: ${{ env.current_python }}
+    - name: Install Poetry
+      run: |
+        pip${{ env.current_python }} install poetry==${{ env.poetry_version }}
+    - name: Get package version from Poetry
+      run: echo "PKG_VERSION=$(poetry version --short)" >> $GITHUB_ENV
+    - name: Check whether the tag matches the package version
+      uses: jannekem/run-python-script-action@utilities
+      with:
+        script: |
+          if '${{ env.GIT_TAG_NAME }}' != 'v${{ env.PKG_VERSION }}':
+              error("Git tag doesn't match the package version! Aborting.")
+              exit(1)
+
+    - name: Check whether the tag matches a stable version
+      id: check-stable
+      uses: jannekem/run-python-script-action@v1
+      with:
+        script: |
+          import os, re
+          tag = os.environ.get('GIT_TAG_NAME')
+          match = re.match(r'^v[0-9]+\.[0-9]+\.[0-9]+$', tag)
+          output = 'true' if match else 'false'
+          print(f'stable = {output}')
+          set_output('stable', output)
+    - name: Check whether the tag matches a development version
+      id: check-develop
+      uses: jannekem/run-python-script-action@v1
+      with:
+        script: |
+          import os, re
+          tag = os.environ.get('GIT_TAG_NAME')
+          match = re.match(r'^v[0-9]+\.[0-9]+\.[0-9]+-dev\.[0-9]+$', tag)
+          output = 'true' if match else 'false'
+          print(f'develop = {output}')
+          set_output('develop', output)
+    outputs:
+      stable: ${{ steps.check-stable.outputs.stable }}
+      develop: ${{ steps.check-develop.outputs.develop }}
+
+  publish-develop:
+    needs: check-tag
+    if: needs.check-tag.outputs.develop == 'true'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        submodules: true
+    - name: Install Python ${{ env.current_python }}
+      uses: actions/setup-python@v2
+      with:
+        python-version: ${{ env.current_python }}
+    - name: Install Poetry
+      run: |
+        pip${{ env.current_python }} install poetry==${{ env.poetry_version }}
+
+    - name: Build the wheel
+      run: poetry build --format wheel
+    - name: Publish the wheel as a prerelease on GitHub
+      uses: ncipollo/release-action@v1
+      with:
+        artifacts: "dist/rinohtype-*.whl"
+        token: ${{ secrets.GITHUB_TOKEN }}
+        prerelease: true
+
+  publish-release:
+    needs: check-tag
+    if: needs.check-tag.outputs.stable == 'true'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        submodules: true
+    - name: Install Python ${{ env.current_python }}
+      uses: actions/setup-python@v2
+      with:
+        python-version: ${{ env.current_python }}
+    - name: Install Poetry
+      run: |
+        pip${{ env.current_python }} install poetry==${{ env.poetry_version }}
+
+    - name: Publish to PyPI
+      env:
+        PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        TESTPYPI_TOKEN: ${{ secrets.TESTPYPI_TOKEN }}
+      run: |
+        poetry publish --build --username __token__ --password "$PYPI_TOKEN"

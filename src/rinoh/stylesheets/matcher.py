@@ -1,3 +1,4 @@
+from rinoh.document import DocumentTree
 from rinoh.style import StyledMatcher, SelectorByName
 from rinoh.styleds import *
 
@@ -60,10 +61,7 @@ matcher = StyledMatcher({
 
 })
 
-matcher('linked reference', ReferenceBase.like(link=True))
-matcher('unlinked reference', ReferenceBase.like(link=False))
-
-matcher('internal hyperlink', StyledText.like('internal link'))
+matcher('linked reference', ReferenceBase)
 matcher('external hyperlink', StyledText.like('external link'))
 matcher('broken hyperlink', StyledText.like('broken link'))
 
@@ -74,6 +72,7 @@ matcher('glossary inline definition',
 
 matcher('body', Paragraph)
 matcher('code block', +CodeBlock)
+matcher('code block caption', CodeBlockWithCaption / Caption)
 matcher('math block', Paragraph.like('math'))
 matcher('attribution', Paragraph.like('attribution'))
 matcher('centered', Paragraph.like('centered'))
@@ -85,6 +84,7 @@ matcher('block quote', GroupedFlowables.like('block quote'))
 #
 
 matcher('chapter', Section.like(level=1))
+matcher('content chapter', DocumentTree / ... / Section.like(level=1))
 
 for i in range(1, 6):
     matcher('heading level {}'.format(i), Heading.like(level=i))
@@ -281,10 +281,11 @@ matcher('footnote label', Note / Paragraph)
 
 # images & figures
 
-matcher('figure', Figure)
 matcher('image', Image)
 matcher('inline image', InlineImage)
-matcher('caption', Caption)
+matcher('figure', Figure)
+matcher('figure image', 'figure' / Image)
+matcher('figure caption', 'figure' / Caption)
 matcher('figure legend', 'figure' / GroupedFlowables.like('legend'))
 matcher('figure legend paragraph', 'figure legend' / Paragraph)
 
@@ -301,8 +302,8 @@ matcher('toc level 2', TableOfContentsEntry.like(depth=2))
 matcher('toc level 3', TableOfContentsEntry.like(depth=3))
 matcher('L3 toc level 3', TableOfContents.like(level=2)
                           / TableOfContentsEntry.like(depth=3))
-matcher('toc linked reference', TableOfContentsEntry
-                                / ... / ReferenceBase.like(link=True))
+matcher('toc entry number reference field',
+        TableOfContentsEntry / ... / ReferenceField.like(type='number'))
 
 matcher('list of figures section', ListOfFiguresSection)
 matcher('list of figures', ListOfFigures)
@@ -317,6 +318,7 @@ matcher('list of tables entry', 'list of tables' / ListOfEntry)
 
 matcher('table', Table)
 matcher('table with caption', TableWithCaption)
+matcher('table caption', 'table with caption' / Caption)
 matcher('choices table', Table.like('choice'))
 matcher('table cell', Table / TableSection / TableRow / TableCell)
 matcher('table body cell background on even row',

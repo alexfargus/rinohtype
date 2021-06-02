@@ -9,23 +9,37 @@ import pytest
 
 from pathlib import Path
 
-from helpers.regression import (render_rst_file, render_sphinx_rst_file,
-                                OUTPUT_DIR)
+import sphinx
+
+from helpers.regression import render_rst_file, render_sphinx_rst_file
 
 
 RST_PATH = Path(__file__).parent / 'rst'
 
+MIN_SPHINX_VERSION = {
+    'sphinx_inline_markup': '3.2',
+}
+
 
 def collect_tests():
     for rst_path in sorted(RST_PATH.glob('*.rst')):
-        yield rst_path.stem
+        marks = []
+        try:
+            version = MIN_SPHINX_VERSION[rst_path.stem]
+            skip = sphinx.version_info < tuple(map(int, version.split('.')))
+            reason = "minimum Sphinx version is " + '.'.join(version)
+            marks.append(pytest.mark.skipif(skip, reason=reason))
+        except KeyError:
+            pass
+        if rst_path.stem.startswith('sphinx_'):
+            marks.append(pytest.mark.with_sphinx)
+        yield pytest.param(rst_path.stem, marks=marks)
 
 
 @pytest.mark.parametrize('test_name', collect_tests())
-def test(test_name):
+def test_rst(test_name):
     rst_path = RST_PATH / (test_name + '.rst')
     if test_name.startswith('sphinx_'):
-        test_output_dir = OUTPUT_DIR / test_name
-        render_sphinx_rst_file(rst_path, test_name, RST_PATH, test_output_dir)
+        render_sphinx_rst_file(rst_path, test_name, RST_PATH)
     else:
         render_rst_file(rst_path, test_name, RST_PATH)

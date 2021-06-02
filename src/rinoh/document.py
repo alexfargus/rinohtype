@@ -24,24 +24,30 @@ from pathlib import Path
 
 import datetime
 import pickle
+import re
 import sys
 import time
 
 from collections import OrderedDict
+from contextlib import suppress
 from copy import copy
 from itertools import count
+from operator import attrgetter
+from os import getenv
 
 from . import __version__, __release_date__
-from .attribute import OptionSet
+from .attribute import OptionSet, Source
 from .backend import pdf
 from .flowable import StaticGroupedFlowables
 from .language import EN
 from .layout import (Container, ReflowRequired,
                      BACKGROUND, CONTENT, HEADER_FOOTER)
-from .number import format_number
+from .number import NumberFormatBase, format_number
+from .reference import ReferenceType
 from .strings import Strings
-from .style import StyleLog
-from .util import RefKeyDictionary
+from .style import Match, StyleLog, ZERO_SPECIFICITY
+from .text import StyledText
+from .util import DEFAULT, WeakMutableKeyDictionary
 from .warnings import warn
 
 
@@ -53,15 +59,12 @@ class DocumentTree(StaticGroupedFlowables):
 
     Args:
         flowables (list[Flowable]): the list of top-level flowables
-        source_root (Path): path used to locate images and include in logging
-            and error and warnings.
         options (Reader): frontend-specific options
 
     """
 
-    def __init__(self, flowables, source_root=None, options=None):
-        super().__init__(flowables)
-        self.source_root = source_root.absolute() if source_root else Path.cwd()
+    def __init__(self, flowables, options=None, style=None, source=None):
+        super().__init__(flowables, style=style, source=source)
         self.options = options
 
 
@@ -71,6 +74,12 @@ class PageOrientation(OptionSet):
 
 class PageType(OptionSet):
     values = 'left', 'right', 'any'
+
+
+class PageNumberFormat(NumberFormatBase):
+    """How (or if) page numbers are displayed"""
+
+    values = NumberFormatBase.values + ('continue', )
 
 
 class Page(Container):
@@ -101,8 +110,7 @@ class Page(Container):
         document = self.document_part.document
         backend_document = document.backend_document
         self.backend_page = document.backend.Page(backend_document,
-                                                  width, height, self.number,
-                                                  self.number_format)
+                                                  width, height, self)
         self._empty = True
         super().__init__('PAGE', None, 0, 0, width, height)
 
@@ -131,7 +139,7 @@ class Page(Container):
                 break
             if first_page.document_part is not self.document_part:
                 continue
-            elif first_page.number == self.number:
+            elif first_page is self:
                 return section
             elif first_page.number > self.number:
                 break
@@ -144,8 +152,16 @@ class Page(Container):
         return self.document_part.page_number_format
 
     @property
+    def page_number_prefix(self):
+        prefix = self.document_part.get_config_value('page_number_prefix',
+                                                     self.document)
+        return prefix.to_string(self) if prefix else None
+
+    @property
     def formatted_number(self):
-        return format_number(self.number, self.number_format)
+        page_number = format_number(self.number, self.number_format)
+        prefix = self.page_number_prefix
+        return prefix + page_number if prefix else page_number
 
     def render(self):
         super().render(BACKGROUND)
@@ -166,17 +182,6 @@ class Page(Container):
         self.canvas.place_annotations()
 
 
-class BackendDocumentMetadata(object):
-    def __init__(self, name):
-        self.name = name
-
-    def __get__(self, instance, object_type):
-        return instance.backend_document.get_metadata(self.name)
-
-    def __set__(self, instance, value):
-        return instance.backend_document.set_metadata(self.name, value)
-
-
 class PartPageCount(object):
     def __init__(self):
         self.count = 0
@@ -191,6 +196,25 @@ class PartPageCount(object):
         self.count += other
         return self
 
+
+class Metadata(dict, Source):
+    def __init__(self, document, **items):
+        super().__init__(**items)
+        self._document = document
+
+    def __setitem__(self, key, value):
+        try:
+            value.source = self
+        except AttributeError:
+            pass
+        super().__setitem__(key, value)
+
+    def __getitem__(self, key):
+        return copy(super().__getitem__(key))
+
+    @property
+    def location(self):
+        return 'document metadata'
 
 
 class Document(object):
@@ -209,17 +233,13 @@ class Document(object):
 
     CACHE_EXTENSION = '.rtc'
 
-    # FIXME: get backend document metadata from Document metadata
-    title = BackendDocumentMetadata('title')
-    author = BackendDocumentMetadata('author')
-    subject = BackendDocumentMetadata('subject')
-    keywords = BackendDocumentMetadata('keywords')
-
     def __init__(self, document_tree, stylesheet, language, strings=None,
                  backend=None):
         """`backend` specifies the backend to use for rendering the document."""
         super().__init__()
         self._print_version_and_license()
+        self._no_cache = getenv('RINOH_NO_CACHE', '0') != '0'
+        self._single_pass = getenv('RINOH_SINGLE_PASS', '0') != '0'
         self.front_matter = []
         self.supporting_matter = {}
         self.document_tree = document_tree
@@ -227,27 +247,28 @@ class Document(object):
         self.language = language
         self._strings = strings or Strings()
         self.backend = backend or pdf
-        self.backend_document = self.backend.Document(self.CREATOR)
         self._flowables = list(id(element)
                                for element in document_tree.elements)
 
-        self.metadata = dict(date=datetime.date.today())
+        self.metadata = Metadata(self, date=datetime.date.today())
         self.counters = {}             # counters for Headings, Figures, Tables
         self.elements = OrderedDict()  # mapping id's to flowables
-        self.ids_by_element = RefKeyDictionary()    # mapping elements to id's
+        self.ids_by_element = WeakMutableKeyDictionary()    # mapping elements to id's
         self.references = {}           # mapping id's to reference data
         self.page_elements = {}        # mapping id's to pages
         self.page_references = {}      # mapping id's to page numbers
+        self._styled_matches = WeakMutableKeyDictionary()   # cache matching styles
         self._sections = []
         self.index_entries = {}
         self._glossary = {}
         self._glossary_first = {}
         self._unique_id = 0
+        self.title_targets = set()
         self.error = False
 
     def _print_version_and_license(self):
-        print('rinohtype {} ({})  Copyright (c) Brecht Machiels'
-              .format(__version__, __release_date__))
+        print('rinohtype {} ({})  Copyright (c) Brecht Machiels and'
+              ' contributors'.format(__version__, __release_date__))
         print('''\
 This program comes with ABSOLUTELY NO WARRANTY. Its use is subject
 to the terms of the GNU Affero General Public License version 3.''')
@@ -260,7 +281,7 @@ to the terms of the GNU Affero General Public License version 3.''')
         return self._unique_id
 
     def get_metadata(self, key):
-        return copy(self.metadata.get(key))
+        return self.metadata.get(key)
 
     def register_element(self, element):
         primary_id = (element.get_id(self, create=False)
@@ -280,8 +301,34 @@ to the terms of the GNU Affero General Public License version 3.''')
         id_references = self.references.setdefault(id, {})
         id_references[reference_type] = value
 
-    def get_reference(self, id, reference_type):
-        return self.references[id][reference_type]
+    def get_reference(self, id, reference_type, default=DEFAULT):
+        if reference_type == ReferenceType.PAGE:
+            return self.page_references.get(id, 'XX')
+        try:
+            return self.references[id][reference_type]
+        except KeyError:
+            if default is DEFAULT:
+                raise
+            return default
+
+    def get_matches(self, styled):
+        styled_matches = self._styled_matches
+        try:
+            return styled_matches[styled]
+        except KeyError:
+            stylesheet = self.stylesheet
+            matches = sorted(stylesheet.find_matches(styled, self),
+                             key=attrgetter('specificity'), reverse=True)
+            last_match = Match(None, ZERO_SPECIFICITY)
+            for match in matches:
+                if (match.specificity == last_match.specificity
+                        and match.style_name != last_match.style_name):
+                    styled.warn('Multiple selectors match with the same '
+                              'specificity. See the style log for details.')
+                match.stylesheet = stylesheet.find_source(match.style_name)
+                last_match = match
+            styled_matches[styled] = matches
+            return matches
 
     def set_glossary(self, term, definition):
         try:
@@ -301,20 +348,25 @@ to the terms of the GNU Affero General Public License version 3.''')
 
     def _load_cache(self, filename):
         """Load the cached page references from `<filename>.ptc`."""
+        if self._no_cache:
+            print('Loading/saving of the references cache is disabled')
+            return {}, {}
         cache_path = filename.with_suffix(self.CACHE_EXTENSION)
         try:
             with cache_path.open('rb') as file:
-                prev_number_of_pages, prev_page_references = pickle.load(file)
+                part_page_counts, page_references = pickle.load(file)
             print('References cache read from {}'.format(cache_path))
         except (IOError, TypeError):
-            prev_number_of_pages, prev_page_references = {}, {}
-        return prev_number_of_pages, prev_page_references
+            part_page_counts, page_references = {}, {}
+        return part_page_counts, page_references
 
-    def _save_cache(self, filename, section_number_of_pages, page_references):
+    def _save_cache(self, filename):
         """Save the current state of the page references to `<filename>.rtc`"""
+        if self._no_cache:
+            return
         cache_path = Path(filename).with_suffix(self.CACHE_EXTENSION)
         with cache_path.open('wb') as file:
-            cache = (section_number_of_pages, page_references)
+            cache = (self.part_page_counts, self.page_references)
             pickle.dump(cache, file)
 
     def set_string(self, strings_class, key, value):
@@ -339,7 +391,7 @@ to the terms of the GNU Affero General Public License version 3.''')
         self.error = False
         filename_root = Path(filename_root) if filename_root else None
         if filename_root and file is None:
-            extension = self.backend_document.extension
+            extension = self.backend.Document.extension
             filename = filename_root.with_suffix(extension)
             file = filename.open('wb')
         elif file and filename_root is None:
@@ -348,77 +400,43 @@ to the terms of the GNU Affero General Public License version 3.''')
             raise ValueError("You need to specify either 'filename_root' or "
                              "'file'.")
 
-        def has_converged(part_page_counts):
-            """Return `True` if the last rendering iteration converged to a
-            stable result.
-
-            Practically, this tests whether the total number of pages and page
-            references to document elements have changed since the previous
-            rendering iteration."""
-            nonlocal prev_number_of_pages, prev_page_references
-            return (part_page_counts == prev_number_of_pages and
-                    self.page_references == prev_page_references)
-
         fake_container = FakeContainer(self)
+        prev_page_counts, prev_page_refs = self._load_cache(filename_root)
         try:
             self.document_tree.build_document(fake_container)
-            (prev_number_of_pages,
-             prev_page_references) = self._load_cache(filename_root)
-
-            self.part_page_counts = prev_number_of_pages
             self.prepare(fake_container)
+            for out_of_line_flowables in self.supporting_matter.values():
+                for flowable in out_of_line_flowables:
+                    flowable.prepare(fake_container)
+            backend_metadata = self._get_backend_metadata()
             self.page_elements.clear()
-            self.page_references = prev_page_references.copy()
-            self.part_page_counts = self._render_pages()
-            while not has_converged(self.part_page_counts):
-                prev_number_of_pages = self.part_page_counts
-                prev_page_references = self.page_references.copy()
-                print('Not yet converged, rendering again...')
-                del self.backend_document
-                self.backend_document = self.backend.Document(self.CREATOR)
+            self.part_page_counts = prev_page_counts
+            self.page_references = prev_page_refs.copy()
+            while True:
+                self.backend_document = \
+                    self.backend.Document(self.CREATOR, **backend_metadata)
                 self.part_page_counts = self._render_pages()
-            self.create_outlines()
+                if (self.part_page_counts == prev_page_counts
+                        and self.page_references == prev_page_refs):
+                    break
+                if self._single_pass:
+                    print('Stopping after first rendering pass.')
+                    break
+                print('Not yet converged, rendering again...')
+                prev_page_counts = self.part_page_counts
+                prev_page_refs = self.page_references.copy()
+                del self.backend_document
+            self._create_outlines(self.backend_document)
             if filename:
-                self._save_cache(filename_root, self.part_page_counts,
-                                 self.page_references)
-                self.style_log.write_log(filename_root)
+                self._save_cache(filename_root)
+                self.style_log.write_log(self.document_tree.source_root,
+                                         filename_root)
                 print('Writing output: {}'.format(filename))
             self.backend_document.write(file)
         finally:
             if filename_root:
                 file.close()
         return not self.error
-
-    def create_outlines(self):
-        """Create an outline in the output file that allows for easy navigation
-        of the document. The outline is a hierarchical tree of all the sections
-        in the document."""
-        sections = parent = []
-        current_level = 1
-        stack = []
-        fake_container = FakeContainer(self)
-        for section in self._sections:
-            if not section.show_in_toc(fake_container):
-                continue
-            section_id = section.get_id(self, create=False)
-            section_number = self.get_reference(section_id, 'number')
-            section_title = self.get_reference(section_id, 'title')
-            if section.level > current_level:
-                if section.level != current_level + 1:
-                    warn("Your document section hierarchy is missing levels. "
-                         "Please report this at https://github.com/brechtm"
-                         "/rinohtype/pull/67")
-                    break
-                stack.append(parent)
-                parent = current
-            elif section.level < current_level:
-                for i in range(current_level - section.level):
-                    parent = stack.pop()
-            current = []
-            item = (str(section_id), section_number, section_title, current)
-            parent.append(item)
-            current_level = section.level
-        self.backend_document.create_outlines(sections)
 
     def _render_pages(self):
         """Render the complete document once and return the number of pages
@@ -432,16 +450,61 @@ to the terms of the GNU Affero General Public License version 3.''')
         part_page_count = PartPageCount()
         last_number_format = None
         for part_template in self.part_templates:
-            part = part_template.document_part(self)
+            part = part_template.document_part(self, last_number_format)
             if part is None:
                 continue
-            if part_template.page_number_format != last_number_format:
+            if part.get_config_value('page_number_format', self) != 'continue':
                 part_page_count = PartPageCount()
             part_page_count += part.render(part_page_count.count + 1)
             part_page_counts[part_template.name] = part_page_count
-            last_number_format = part_template.page_number_format
+            last_number_format = part.page_number_format
         sys.stdout.write('\n')     # for the progress indicator
         return part_page_counts
+
+    def _create_outlines(self, backend_document):
+        """Create an outline in the output file that allows for easy navigation
+        of the document. The outline is a hierarchical tree of all the sections
+        in the document."""
+        sections = parent = []
+        current_level = 1
+        stack = []
+        fake_container = FakeContainer(self)
+        for section in self._sections:
+            if not section.show_in_toc(fake_container):
+                continue
+            section_id = section.get_id(self, create=False)
+            section_number = self.get_reference(section_id, 'number', None)
+            section_title = self.get_reference(section_id, 'title')
+            if section.level > current_level:
+                if section.level != current_level + 1:
+                    warn("Your document section hierarchy is missing levels. "
+                         "Please report this at https://github.com/brechtm"
+                         "/rinohtype/pull/67")
+                    break
+                stack.append(parent)
+                parent = current
+            elif section.level < current_level:
+                for i in range(current_level - section.level):
+                    parent = stack.pop()
+            current = []
+            with suppress(AttributeError):
+                section_title = section_title.to_string(fake_container)
+            with suppress(AttributeError):
+                section_number = section_number.to_string(fake_container)
+            item = (str(section_id), section_number, section_title, current)
+            parent.append(item)
+            current_level = section.level
+        backend_document.create_outlines(sections)
+
+    def _get_backend_metadata(self):
+        """Transforms document metadata to sanitized plain text strings"""
+        result = {}
+        for key in (k for k in ('title', 'author') if k in self.metadata):
+            value = self.get_metadata(key)
+            if isinstance(value, StyledText):
+                value = value.to_string(None)
+            result[key] = re.sub(r"\s+", ' ', value.replace('\b', ''))
+        return result
 
     PROGRESS_TEMPLATE = \
         '\r{:3d}% [{}{}] ETA {:02d}:{:02d} ({:02d}:{:02d}) page {}'

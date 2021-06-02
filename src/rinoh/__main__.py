@@ -11,18 +11,19 @@ import os
 import webbrowser
 
 from collections import OrderedDict
-
-from pkg_resources import get_distribution, iter_entry_points
+from pathlib import Path
 
 from rinoh import __version__, __release_date__
 
+from rinoh.attribute import Source
 from rinoh.dimension import PT
 from rinoh.document import DocumentTree
 from rinoh.flowable import StaticGroupedFlowables, GroupedFlowablesStyle
-from rinoh.font import Typeface, FontSlant
+from rinoh.font import Typeface, FontSlant, FontWeight, FontWidth
+from rinoh.font.google import installed_google_fonts_typefaces
 from rinoh.paper import Paper, PAPER_BY_NAME
 from rinoh.paragraph import ParagraphStyle, Paragraph
-from rinoh.resource import ResourceNotInstalled
+from rinoh.resource import find_entry_points, ResourceNotFound
 from rinoh.style import StyleSheet, StyleSheetFile
 from rinoh.stylesheets import matcher
 from rinoh.template import DocumentTemplate, TemplateConfigurationFile
@@ -85,30 +86,27 @@ parser.add_argument('--docs', action='store_true',
                          'browser')
 
 
-def get_distribution_str(entry_point):
-    dist = entry_point.dist
-    return ('built-in' if dist == get_distribution('rinohtype')
-            else '{0.project_name} {0.version}'.format(dist))
+def get_distribution_name(dist):
+    return ('built-in' if dist.metadata['Name'] == 'rinohtype'
+            else '{0[Name]} {0[Version]}'.format(dist.metadata))
 
 
 def get_reader_by_name(format_name):
-    for entry_point in iter_entry_points('rinoh.frontends'):
-        if format_name.lower() == entry_point.name.lower():
-            return entry_point.name, entry_point.load()
+    for entry_point, _ in find_entry_points('rinoh.frontends',
+                                            format_name.lower()):
+        return entry_point.name, entry_point.load()
     raise SystemExit("Unknown format '{}'. Run `{} --list-formats` to "
                      "find out which formats are supported."
                      .format(format_name, parser.prog))
 
 
 def get_reader_by_extension(file_extension):
-    for entry_point in iter_entry_points('rinoh.frontends'):
+    for entry_point, dist in find_entry_points('rinoh.frontends'):
         reader_cls = entry_point.load()
-        for reader_extension in reader_cls.extensions:
-            if reader_extension == file_extension:
-                print('Using the {} frontend [{}]'
-                      .format(entry_point.name,
-                              get_distribution_str(entry_point)))
-                return entry_point.name, reader_cls
+        if file_extension in reader_cls.extensions:
+            print('Using the {} frontend [{}]'
+                  .format(entry_point.name, get_distribution_name(dist)))
+            return entry_point.name, reader_cls
     raise SystemExit("Cannot determine input format from extension '{}'. "
                      "Specify the format using the `--format` option. Run "
                      "`{} --list-formats` to find out which formats are "
@@ -116,8 +114,10 @@ def get_reader_by_extension(file_extension):
 
 
 def installed_typefaces():
-    for entry_point in iter_entry_points('rinoh.typefaces'):
-        yield entry_point.load(), get_distribution_str(entry_point)
+    for entry_point, dist in find_entry_points('rinoh.typefaces'):
+        yield entry_point.load(), get_distribution_name(dist)
+    for typeface in installed_google_fonts_typefaces():
+        yield typeface, 'Google Fonts'
 
 
 def display_fonts(filename):
@@ -125,8 +125,10 @@ def display_fonts(filename):
         style = ParagraphStyle(typeface=typeface, font_width=font.width,
                                font_slant=font.slant, font_weight=font.weight)
         return Paragraph('{} {} {} {}'
-                         .format(typeface.name, font.width.title(),
-                                 font.slant.title(), font.weight.title()),
+                         .format(typeface.name,
+                                 FontWidth.to_name(font.width).title(),
+                                 font.slant.title(),
+                                 FontWeight.to_name(font.weight).title()),
                          style=style)
 
     def typeface_section(typeface, distribution):
@@ -169,12 +171,11 @@ def main():
         do_exit = True
     if args.list_formats:
         print('Supported input file formats:')
-        for entry_point in iter_entry_points('rinoh.frontends'):
+        for entry_point, dist in find_entry_points('rinoh.frontends'):
             reader_cls = entry_point.load()
-            distribution = get_distribution_str(entry_point)
             print('- {} (.{}) [{}]'
                   .format(entry_point.name, ', .'.join(reader_cls.extensions),
-                          distribution))
+                          get_distribution_name(dist)))
         do_exit = True
     if args.list_options:
         reader_name, reader_cls = get_reader_by_name(args.list_options)
@@ -199,11 +200,12 @@ def main():
                 for width, fonts in widths.items():
                     styles = []
                     for font in fonts:
-                        style = font.weight.title()
+                        style = FontWeight.to_name(font.weight)
                         if font.slant != FontSlant.UPRIGHT:
-                            style = '{}-{}'.format(font.slant.title(), style)
+                            style = '{}-{}'.format(font.slant, style)
                         styles.append(style)
-                    print('   {}: {}'.format(width.title(), ', '.join(styles)))
+                    print('   {}: {}'.format(FontWidth.to_name(width),
+                                             ', '.join(styles)))
         else:
             display_fonts(args.list_fonts)
         do_exit = True
@@ -216,13 +218,15 @@ def main():
 
     template_cfg = {}
     variables = {}
+    cwd_source = CwdSource()
     if args.stylesheet:
         if os.path.isfile(args.stylesheet):
-            stylesheet = StyleSheetFile(args.stylesheet, matcher=matcher)
+            stylesheet = StyleSheetFile(args.stylesheet, matcher=matcher,
+                                        source=cwd_source)
         else:
             try:
                 stylesheet = StyleSheet.from_string(args.stylesheet)
-            except ResourceNotInstalled as err:
+            except ResourceNotFound as err:
                 raise SystemExit("Could not find the Style sheet '{}'. "
                                  "Aborting.\n"
                                  "Run `{} --list-stylesheets` to find out "
@@ -270,7 +274,8 @@ def main():
     reader = reader_cls(**options)
 
     if os.path.isfile(args.template):
-        template_cfg['base'] = TemplateConfigurationFile(args.template)
+        template_cfg['base'] = TemplateConfigurationFile(args.template,
+                                                         source=cwd_source)
         template_cls = template_cfg['base'].template
     else:
         template_cls = DocumentTemplate.from_string(args.template)
@@ -286,21 +291,30 @@ def main():
             if not success:
                 raise SystemExit('Rendering completed with errors')
             break
-        except ResourceNotInstalled as err:
-            not_installed_msg = ("{} '{}' not installed."
-                                 .format(err.resource_type.title(),
-                                         err.resource_name))
+        except ResourceNotFound as err:
             if args.install_resources:
-                print(not_installed_msg + ' Attempting to install it from '
-                                          'PyPI...')
+                print("Attempting to the install the '{}' {} from PyPI:"
+                      .format(err.resource_name, err.resource_type.title()))
                 success = Typeface.install_from_pypi(err.entry_point_name)
                 if not success:
                     raise SystemExit("No '{}' {} found on PyPI. Aborting."
                                      .format(err.resource_name,
                                              err.resource_type))
             else:
-                raise SystemExit(not_installed_msg + " Consider passing the "
-                                 "--install-resources command line option.")
+                raise SystemExit("{} '{}' not installed. Consider passing the "
+                                 "--install-resources command line option."
+                                 .format(err.resource_type.title(),
+                                         err.resource_name))
+
+
+class CwdSource(Source):
+    @property
+    def location(self):
+        return 'current working directory'
+
+    @property
+    def root(self):
+        return Path.cwd()
 
 
 if __name__ == '__main__':

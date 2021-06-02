@@ -37,9 +37,23 @@ class DocutilsNode(TreeNode, metaclass=TreeNodeMeta):
     def node_children(node):
         return node.children
 
-    @staticmethod
-    def node_location(node):
-        return node.source, node.line, node.tagname
+    @property
+    def location(self):
+        source = self.node.source or self.node.get('source')
+        return source, self.node.line, self.node.tagname
+
+    @property
+    def root(self):
+        node = self.node
+        while node.document is None:
+            node = node.parent  # https://sourceforge.net/p/docutils/bugs/410/
+        settings = node.document.settings
+        try:                    # Sphinx
+            sphinx_env = settings.env
+        except AttributeError:  # plain docutils
+            source_path = settings._source
+            return Path(source_path).parent if source_path else None
+        return Path(sphinx_env.srcdir)
 
     @property
     def _ids(self):
@@ -107,18 +121,14 @@ class DocutilsReader(Reader):
 
     def parse(self, filename_or_file, **context):
         try:
-            filename = Path(filename_or_file)
-            settings_overrides = dict(input_encoding='utf-8')
-            doctree = publish_doctree(None, source_path=str(filename),
-                                      source_class=FileInput,
-                                      settings_overrides=settings_overrides,
-                                      parser=self.parser_class())
+            file, filename = None, Path(filename_or_file)
+            kwargs = dict(source_path=str(filename),
+                          settings_overrides=dict(input_encoding='utf-8'))
         except TypeError:
-            filename = getattr(filename_or_file, 'name', None)
-            doctree = publish_doctree(filename_or_file,
-                                      source_class=FileInput,
-                                      parser=self.parser_class())
-        return from_doctree(filename, doctree, **context)
+            file, kwargs = filename_or_file, {}
+        doctree = publish_doctree(file, source_class=FileInput,
+                                  parser=self.parser_class(), **kwargs)
+        return from_doctree(doctree, **context)
 
 
 class ReStructuredTextReader(DocutilsReader):
@@ -126,8 +136,6 @@ class ReStructuredTextReader(DocutilsReader):
     parser_class = ReStructuredTextParser
 
 
-def from_doctree(filename, doctree, source_root=None, **context):
-    mapped_tree = DocutilsNode.map_node(doctree.document, **context)
-    flowables = mapped_tree.children_flowables()
-    source_root = source_root or Path(filename).parent
-    return DocumentTree(flowables, source_root=source_root)
+def from_doctree(doctree, **context):
+    mapped_tree = DocutilsNode.map_node(doctree, **context)
+    return mapped_tree.flowable()

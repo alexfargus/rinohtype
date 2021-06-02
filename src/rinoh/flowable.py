@@ -17,6 +17,7 @@ that make up the content of a document and are rendered onto its pages.
 """
 
 
+from contextlib import suppress
 from copy import copy
 from itertools import chain
 from token import NAME
@@ -38,7 +39,7 @@ __all__ = ['Flowable', 'FlowableStyle',
            'FlowableWidth', 'HorizontalAlignment', 'Break',
            'DummyFlowable', 'AnchorFlowable', 'WarnFlowable',
            'SetMetadataFlowable', 'SetUserStringFlowable',
-           'SetSupportingMatter',
+           'SetOutOfLineFlowables',
            'GroupedFlowables', 'StaticGroupedFlowables',
            'LabeledFlowable', 'GroupedLabeledFlowables',
            'Float', 'PageBreak']
@@ -54,11 +55,11 @@ class FlowableWidth(OptionSet):
         return Dimension.check_type(value) or super().check_type(value)
 
     @classmethod
-    def from_tokens(cls, tokens):
+    def from_tokens(cls, tokens, source):
         if tokens.next.type == NAME:
-            return super().from_tokens(tokens)
+            return super().from_tokens(tokens, source)
         else:
-            return Dimension.from_tokens(tokens)
+            return Dimension.from_tokens(tokens, source)
 
     @classmethod
     def doc_format(cls):
@@ -72,7 +73,8 @@ class HorizontalAlignment(OptionSet):
 
 
 class Break(OptionSet):
-    values = None, 'any', 'left', 'right'
+    values = (None, 'any', 'left', 'right',
+              'any restart', 'left restart', 'right restart')
 
 
 class FlowableStyle(Style):
@@ -135,11 +137,10 @@ class Flowable(Styled):
     break_exception = PageBreakException
 
     def __init__(self, align=None, width=None,
-                 id=None, style=None, parent=None):
+                 id=None, style=None, parent=None, source=None):
         """Initialize this flowable and associate it with the given `style` and
         `parent` (see :class:`Styled`)."""
-        super().__init__(id=id, style=style, parent=parent)
-        self.annotation = None
+        super().__init__(id=id, style=style, parent=parent, source=source)
         self.align = align
         self.width = width
 
@@ -195,15 +196,17 @@ class Flowable(Styled):
         by the `space_below` style attribute."""
         top_to_baseline = 0
         page_break = self.get_style('page_break', container)
+        break_type = page_break.split()[0] if page_break else None
         state = state or self.initial_state(container)
         if state.initial:
             if page_break:
                 page_number = container.page.number
                 this_page_type = 'left' if page_number % 2 == 0 else 'right'
                 if not (container.page._empty
-                        and page_break in (Break.ANY, this_page_type)):
-                    if page_break == Break.ANY:
-                        page_break = 'left' if page_number % 2 else 'right'
+                        and break_type in (Break.ANY, this_page_type)):
+                    if break_type == Break.ANY:
+                        break_type = 'left' if page_number % 2 else 'right'
+                        page_break = page_break.replace('any', break_type)
                     chain = container.top_level_container.chain
                     raise self.break_exception(page_break, chain, state)
             space_above = self.get_style('space_above', container)
@@ -228,10 +231,10 @@ class Flowable(Styled):
         initial_after = state is not None and state.initial
         top_to_baseline += inner_top_to_baseline
 
-        if self.annotation:
+        annotation = self.get_annotation(container)
+        if annotation:
             height = float(margin_container.height)
-            margin_container.canvas.annotate(self.annotation,
-                                             0, 0, width, height)
+            margin_container.canvas.annotate(annotation, 0, 0, width, height)
         self.mark_page_nonempty(container)
         if initial_before and not initial_after:
             if reference_id:
@@ -415,13 +418,15 @@ class SetUserStringFlowable(DummyFlowable):
         doc.set_string(UserStrings, self.label, self.content)
 
 
-class SetSupportingMatter(DummyFlowable):
-    def __init__(self, flowables, parent=None):
-        super().__init__(id=id, parent=parent)
+class SetOutOfLineFlowables(DummyFlowable):
+    def __init__(self, names, flowables, parent=None):
+        super().__init__(parent=parent)
+        self.names = names
         self.flowables = flowables
 
     def build_document(self, flowable_target):
-        flowable_target.document.supporting_matter[self.id] = self.flowables
+        for name in self.names:
+            flowable_target.document.supporting_matter[name] = self.flowables
 
 
 # grouping flowables
@@ -578,9 +583,9 @@ class StaticGroupedFlowables(GroupedFlowables):
     """
 
     def __init__(self, flowables, align=None, width=None,
-                 id=None, style=None, parent=None):
+                 id=None, style=None, parent=None, source=None):
         super().__init__(align=align, width=width,
-                         id=id, style=style, parent=parent)
+                         id=id, style=style, parent=parent, source=source)
         self.children = []
         for flowable in flowables:
             self.append(flowable)

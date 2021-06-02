@@ -13,8 +13,8 @@ rinohtype
    :target: https://gitter.im/brechtm/rinohtype
    :alt: Gitter chat
 
-.. image:: https://github.com/brechtm/rinohtype/workflows/Tests/badge.svg?branch=master&event=push
-   :target: https://github.com/brechtm/rinohtype/actions?query=workflow%3ATests+branch%3Amaster+event%3Apush
+.. image:: https://github.com/brechtm/rinohtype/workflows/Test%20&%20Publish/badge.svg
+   :target: https://github.com/brechtm/rinohtype/actions?query=workflow%3A%22Test+%26+Publish%22
    :alt: Tests
 
 .. image:: https://codecov.io/gh/brechtm/rinohtype/branch/master/graph/badge.svg
@@ -42,7 +42,7 @@ following things can help move rinohtype forward:
 * development of new features, e.g. widow/orphan handling, Knuth-Plass line
   breaking, mathematics typesetting, performance improvements, ...
 * companies might be interested in funding the development of particular
-  features that would benefit them
+  features
 
 So if you are interested in helping with any of these items, please don't
 hesitate to get in touch via brecht@opqode.com, `GitHub issues`_ or Gitter_!
@@ -80,26 +80,33 @@ overview of the main features:
 rinohtype's primary input format is reStructuredText_. The ``rinoh`` command
 line tool renders reStructuredText documents and the included Sphinx_ builder
 makes it possible to output large documents with your own style applied. Have
-a look at the `rinohtype documentation`_ for an example of the output.
+a look at the `rinohtype manual`_ for an example of the output.
 
-.. _documentation: http://www.mos6581.org/rinohtype/
+There is also a commercial DITA_ frontend, but it's development is currently
+on hold. Please `contact me`_ if you are interested in testing it.
+
+.. _documentation: http://www.mos6581.org/rinohtype/master/
 .. _create a ticket: https://github.com/brechtm/rinohtype/issues/new/choose
 .. _reStructuredText: http://docutils.sourceforge.net/rst.html
 .. _Sphinx: http://sphinx-doc.org
-.. _rinohtype documentation: http://www.mos6581.org/rinohtype/_downloads/rinohtype.pdf
+.. _rinohtype manual: http://www.mos6581.org/rinohtype/master/manual.pdf
+.. _DITA: https://en.wikipedia.org/wiki/Darwin_Information_Typing_Architecture
+.. _contact me: brecht@opqode.com
 
 
 Requirements
 ------------
 
-rinohtype supports Python 3.5 and up. For parsing reStructuredText and
-CommonMark documents, rinohtype depends on docutils_ and recommonmark_
-respectively. pip_ takes care of these requirements when you install rinohtype.
+rinohtype supports all stable Python 3 versions that have not reached
+end-of-life_ status. For parsing reStructuredText and CommonMark documents,
+rinohtype depends on docutils_ and recommonmark_ respectively. pip_ takes care
+of installing these requirements when you install rinohtype.
 
 Syntax highlighting of code blocks is eneabled if Pygments_ is installed, which
 will be installed automatically with Sphinx_. If you want to include images
 other than PDF, PNG or JPEG, you also need to install Pillow_.
 
+.. _end-of-life: https://devguide.python.org/#status-of-python-branches
 .. _docutils: http://docutils.sourceforge.net/index.html
 .. _recommonmark: https://recommonmark.readthedocs.io
 .. _pip: https://pip.pypa.io
@@ -152,7 +159,8 @@ License
 -------
 
 All of rinohtype's source code is licensed under the `Affero GPL 3.0`_, unless
-indicated otherwise in the source file (such as ``hyphenator.py``).
+indicated otherwise in the source file (such as ``hyphenator.py`` and
+``purepng.py``).
 
 The Affero GPL requires for software that builds on rinohtype to also be
 released as open source under this license. For building closed-source
@@ -160,4 +168,4 @@ applications, you can obtain a `commercial license`_. The author of rinohtype
 is also available for consultancy projects involving rinohtype.
 
 .. _Affero GPL 3.0: https://www.gnu.org/licenses/agpl-3.0.html
-.. _commercial license: brecht.machiels@opqode.com
+.. _commercial license: `contact me`_

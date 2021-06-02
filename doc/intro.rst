@@ -76,15 +76,15 @@ Sphinx Builder
                       rendering a Sphinx project to PDF without the need for a
                       LaTeX installation.
 
-.. only:: not rinoh
+.. only:: html
 
-    |common| This documentation was rendered by rinohtype to
-    :download:`rinohtype.pdf <_build/rinoh/rinohtype.pdf>`.
+    |common| The version of this documentation as rendered by rinohtype can be
+    downloaded from the sidebar ('PDF' links).
 
 .. only:: rinoh
 
-    |common| This very document you are reading was rendered using
-    rinohtype's Sphinx builder.
+    |common| The document you are reading was rendered using rinohtype's
+    Sphinx builder.
 
 
 High-level PDF library

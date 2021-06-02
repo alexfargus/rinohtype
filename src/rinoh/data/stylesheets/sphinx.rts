@@ -132,10 +132,6 @@ font_color=#f00
 [linked reference]
 font_color=#355f7c
 
-[internal hyperlink]
-font_slant=italic
-font_color=#355f7b
-
 [external hyperlink]
 font_color=#376f62
 
@@ -160,6 +156,10 @@ padding_left=5pt
 padding_top=1pt
 padding_bottom=3pt
 
+[code block caption]
+base=caption
+keep_with_next=true
+
 [math block]
 base=code block
 border=none
@@ -183,6 +183,9 @@ text_align=left
 
 [chapter]
 page_break=RIGHT
+
+[content chapter]
+base=chapter
 
 [heading level 1]
 typeface=$(sans_typeface)
@@ -406,7 +409,7 @@ font_slant=ITALIC
 base=definition list item
 space_above=3pt
 space_below=3pt
-label_max_width=none
+label_max_width=0
 
 [object signatures]
 base=definition term
@@ -598,6 +601,7 @@ border_top=$(thin_black_stroke)
 space_above=18pt
 
 [footnote marker]
+base=linked reference
 position=SUPERSCRIPT
 number_format=number
 
@@ -616,16 +620,20 @@ line_spacing=Fixed(10pt)
 base=footnote paragraph
 text_align=RIGHT
 
-[figure]
-space_above=10pt
-space_below=12pt
-
 
 [image]
 space_above=10pt
 horizontal_align=CENTER
 
-[caption]
+[figure]
+space_above=10pt
+space_below=12pt
+
+[figure image]
+base=image
+keep_with_next=true
+
+[caption : Caption]
 base=default
 font_size=9pt
 line_spacing=Fixed(10pt)
@@ -634,6 +642,9 @@ space_above=4pt
 space_below=0pt
 text_align=CENTER
 label_suffix='. '
+
+[figure caption]
+base=caption
 
 [figure legend]
 margin_left=30pt
@@ -672,6 +683,10 @@ base=table of contents
 margin_left=0
 tab_stops=0.6cm, 100% RIGHT '. '
 
+[toc entry number reference field]
+base = linked reference
+quiet = True
+
 [list of figures section]
 base=table of contents section
 
@@ -695,6 +710,10 @@ base=list of figures entry
 space_above=5pt
 space_below=5pt
 horizontal_align=CENTER
+
+[table caption]
+base=caption
+keep_with_next=true
 
 [table cell]
 space_above=2pt

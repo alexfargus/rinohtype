@@ -13,7 +13,7 @@ Classes for fonts and typefaces.
 from warnings import warn
 
 from .style import FontWeight, FontSlant, FontWidth
-from ..resource import Resource
+from ..resource import Resource, ResourceNotFound
 from ..util import NotImplementedAttribute
 from ..warnings import warn
 
@@ -82,8 +82,7 @@ class Font(object):
     x_height = NotImplementedAttribute()
     stem_v = NotImplementedAttribute()
 
-    def __init__(self, filename,
-                 weight='medium', slant='upright', width='normal'):
+    def __init__(self, filename, weight, slant, width):
         self.filename = filename
         self.weight = FontWeight.validate(weight)
         self.slant = FontSlant.validate(slant)
@@ -179,6 +178,17 @@ class Typeface(Resource, dict):
         return self.name
 
     @classmethod
+    def parse_string(cls, name, source):
+        try:
+            typeface = super().parse_string(name, source)
+        except ResourceNotFound as rni:
+            try:
+                typeface = google_typeface(name)
+            except GoogleFontNotFound:
+                raise rni
+        return typeface
+
+    @classmethod
     def check_type(cls, value):
         return isinstance(value, cls)
 
@@ -198,13 +208,13 @@ class Typeface(Resource, dict):
             Font: the next font in this typeface
 
         """
-        for width in (w for w in FontWidth if w in self):
-            for slant in (s for s in FontSlant if s in self[width]):
-                for weight in (w for w in FontWeight
-                               if w in self[width][slant]):
+        for width in sorted(self):
+            for slant in self[width]:
+                for weight in sorted(self[width][slant]):
                     yield self[width][slant][weight]
 
-    def get_font(self, weight='medium', slant='upright', width='normal'):
+    def get_font(self, weight=FontWeight.REGULAR, slant=FontSlant.UPRIGHT,
+                 width=FontWidth.NORMAL):
         """Return the font matching or closest to the given style
 
         If a font with the given weight, slant and width is available, return
@@ -219,37 +229,22 @@ class Typeface(Resource, dict):
             Font: the requested font
 
         """
-        def find_closest_style(style, styles, alternatives):
-            try:
-                return style, styles[style]
-            except KeyError:
-                for option in alternatives[style]:
-                    try:
-                        return option, styles[option]
-                    except KeyError:
-                        continue
+        def find_closest(attribute, value, available):
+            nearest = attribute.nearest(value, available)
+            return nearest, available[nearest]
 
-        def find_closest_weight(weight, weights):
-            index = FontWeight.values.index(weight)
-            min_distance = len(FontWeight.values)
-            closest = None
-            for i, option in enumerate(FontWeight.values):
-                if option in weights and abs(index - i) < min_distance:
-                    min_distance = abs(index - i)
-                    closest = option
-            return closest, weights[closest]
-
-        available_width, slants = find_closest_style(width, self,
-                                                     FontWidth.alternatives)
-        available_slant, weights = find_closest_style(slant, slants,
-                                                      FontSlant.alternatives)
-        available_weight, font = find_closest_weight(weight, weights)
-
-        if (available_width != width or available_slant != slant or
-            available_weight != weight):
+        available_width, slants = find_closest(FontWidth, width, self)
+        available_slant, weights = find_closest(FontSlant, slant, slants)
+        available_weight, font = find_closest(FontWeight, weight, weights)
+        if ((available_width, available_slant, available_weight)
+                != (width, slant, weight)):
+            gv_width =  FontWidth.to_name(width)
+            gv_weigth = FontWeight.to_name(weight)
+            av_width = FontWidth.to_name(available_width)
+            av_weight = FontWeight.to_name(available_weight)
             warn('{} does not include a {} {} {} font. Falling back to {} {} '
-                 '{}'.format(self.name, width, weight, slant, available_width,
-                             available_weight, available_slant))
+                 '{}'.format(self.name, gv_width, gv_weigth, slant, av_width,
+                             av_weight, available_slant))
         return font
 
     # TODO: return bolder font than given font
@@ -298,3 +293,6 @@ class LeafGetter(object):
 
 class MissingGlyphException(Exception):
     """The font does not contain a glyph for the given unicode character"""
+
+
+from .google import google_typeface, GoogleFontNotFound

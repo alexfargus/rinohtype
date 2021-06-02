@@ -14,6 +14,7 @@ Classes for representing and typesetting paragraphs
 import re
 
 from ast import literal_eval
+from collections.abc import Iterable
 from copy import copy
 from functools import partial
 from itertools import tee, chain, groupby, count
@@ -22,14 +23,16 @@ from os import path
 from . import DATA_PATH
 from .annotation import AnnotatedSpan
 from .attribute import (Attribute, AttributeType, OptionSet, ParseError,
-                        OverrideDefault)
+                        OverrideDefault, Integer)
 from .dimension import Dimension, PT
 from .flowable import Flowable, FlowableStyle, FlowableState, FlowableWidth
 from .font import MissingGlyphException
 from .hyphenator import Hyphenator
 from .inline import InlineFlowableException
 from .layout import EndOfContainer, ContainerOverflow
-from .text import TextStyle, MixedStyledText, SingleStyledText, ESCAPE
+from .number import NumberStyle, Label, format_number
+from .text import (TextStyle, StyledText, SingleStyledText, MixedStyledText,
+                   ESCAPE)
 from .util import all_subclasses, ReadAliasAttribute
 
 
@@ -75,7 +78,7 @@ class LineSpacing(AttributeType):
     REGEX = re.compile(r'^(?P<type>[a-z]+)(\((?P<arg>.*)\))?$', re.I)
 
     @classmethod
-    def parse_string(cls, string):
+    def parse_string(cls, string, source):
         m = cls.REGEX.match(string)
         if not m:
             raise ParseError("'{}' is not a valid {} type"
@@ -319,7 +322,7 @@ class TabStopList(AttributeType, list):
                        re.IGNORECASE | re.VERBOSE)
 
     @classmethod
-    def parse_string(cls, string):
+    def parse_string(cls, string, source):
         tabstops = []
         i = 0
         while string[i:]:
@@ -345,7 +348,7 @@ class TabStopList(AttributeType, list):
 
 
 # TODO: look at Word/OpenOffice for more options
-class ParagraphStyle(FlowableStyle, TextStyle):
+class ParagraphStyle(FlowableStyle, NumberStyle, TextStyle):
     width = OverrideDefault('fill')
 
     indent_first = Attribute(Dimension, 0*PT, 'Indentation of the first line '
@@ -355,6 +358,15 @@ class ParagraphStyle(FlowableStyle, TextStyle):
     text_align = Attribute(TextAlign, 'justify', 'Alignment of text to the '
                                                  'margins')
     tab_stops = Attribute(TabStopList, TabStopList(), 'List of tab positions')
+    number_format = OverrideDefault(None)
+    number_separator = Attribute(StyledText, '.',
+                                 "Characters inserted between the number label"
+                                 " of this element's parent and this element's"
+                                 " own number label. If ``None``, only show"
+                                 " this item's number label.")
+    numbering_level = Attribute(Integer, 0, 'At which section level to '
+                                            'restart numbering (positive: '
+                                            'absolute, negative: relative)')
 
 
 class Glyph(object):
@@ -515,18 +527,19 @@ def spans_to_words(spans, container):
         try:
             get_glyph, lig_kern = create_lig_kern(span, container)
             groups = groupby(iter(span.text(container)), WHITESPACE.get)
-            for special, characters in groups:
+            for special, chars in groups:
                 if special:
                     if word:
                         yield word
-                    for _ in characters:
+                    for _ in chars:
                         yield special(span, lig_kern)
                     word = Word()
                 else:
-                    part = ''.join(characters)
+                    part = ''.join(chars).replace('\N{NO-BREAK SPACE}', ' ')
                     try:
                         glyphs = [get_glyph(char) for char in part]
                     except MissingGlyphException:
+                        # FIXME: span annotations are lost here
                         rest = ''.join(char for _, group in groups
                                        for char in group)
                         rest_of_span = SingleStyledText(part + rest,
@@ -583,16 +596,83 @@ class ParagraphState(FlowableState):
         self._first_word = word
 
 
-class ParagraphBase(Flowable):
+class ParagraphBase(Flowable, Label):
     """Base class for paragraphs
 
-    A paragraph is a collection of mixed-styled text that can be flowed into a
+    A paragraph holds styled text and other line elements to be flowed into a
     container.
 
     """
 
+    category = 'Paragraph'
     style_class = ParagraphStyle
     significant_whitespace = False
+
+    def __init__(self, custom_label=None, align=None, width=None,
+                 id=None, style=None, parent=None, source=None):
+        super().__init__(align=align, width=width,
+                         id=id, style=style, parent=parent, source=source)
+        Label.__init__(self, custom_label=custom_label)
+
+    @property
+    def referenceable(self):
+        return self
+
+    def prepare(self, flowable_target):
+        super().prepare(flowable_target)
+        document = flowable_target.document
+        number_format = self.get_style('number_format', flowable_target)
+        if self.get_style('custom_label', flowable_target):
+            assert self.custom_label is not None
+            label = str(self.custom_label)
+        elif number_format:
+            numbering_level = self.get_style('numbering_level', flowable_target)
+            section = self.section
+            if numbering_level < 0:
+                numbering_level = section.level + numbering_level
+            while section and section.level > numbering_level:
+                section = section.parent.section
+            section_id = section.get_id(document, False) if section else None
+            ref_category = self.referenceable.category
+            section_counters = document.counters.setdefault(ref_category, {})
+            section_counter = section_counters.setdefault(section_id, [])
+            section_counter.append(self)
+            number = len(section_counter)
+            label = self.prepare_label(number, section, flowable_target)
+        else:
+            return
+        category = self.referenceable.category
+        reference = MixedStyledText([category, ' ', label])
+        for id in self.referenceable.get_ids(document):
+            document.set_reference(id, 'number', label)
+            document.set_reference(id, 'reference', reference)
+
+    def prepare_label(self, number, parent_section, container):
+        document = container.document
+        number_format = self.get_style('number_format', container)
+        label = format_number(number, number_format)
+        separator = self.get_style('number_separator', container)
+        if separator is not None and parent_section and parent_section.level > 0:
+            parent_id = parent_section.get_id(document)
+            parent_ref = document.get_reference(parent_id, 'number', None)
+            if parent_ref:
+                separator_string = separator.to_string(container)
+                label = parent_ref + separator_string + label
+        return label
+
+    def number(self, container):
+        document = container.document
+        target_id = self.referenceable.get_id(document)
+        formatted_number = document.get_reference(target_id, 'number')
+        if formatted_number:
+            return self.format_label(formatted_number, container)
+        else:
+            return ''
+
+    def text(self, container):
+        number_format = self.get_style('number_format', container)
+        number = [self.number(container)] if number_format else []
+        return MixedStyledText(number + [self.content], parent=self)
 
     @property
     def paragraph(self):
@@ -609,7 +689,7 @@ class ParagraphBase(Flowable):
         return ''.join(item.to_string(flowable_target) for
                        item in self.text(flowable_target))
 
-    def text(self, container):
+    def _text(self, container):
         raise NotImplementedError('{}.text()'.format(self.__class__.__name__))
 
     def render(self, container, descender, state, space_below=0,
@@ -713,21 +793,40 @@ class ParagraphBase(Flowable):
         return max_line_width, first_line.advance, descender
 
 
-class Paragraph(MixedStyledText, ParagraphBase):
+class StaticParagraph(ParagraphBase):
     """A paragraph of static text
 
     Args:
-        text_or_items: see :class:`.MixedStyledText`
-        style: see :class:`.Styled`
-        parent: see :class:`.DocumentElement`
+        content (StyledText): the paragraph's text content
 
     """
+    has_title = False
 
-    style_class = ParagraphBase.style_class
-    fallback_to_parent = ParagraphBase.fallback_to_parent
+    def __init__(self, content, custom_label=None, align=None, width=None,
+                 id=None, style=None, parent=None, source=None):
+        super().__init__(custom_label=custom_label, align=align, width=width,
+                         id=id, style=style, parent=parent, source=source)
+        if isinstance(content, str):
+            content = SingleStyledText(content)
+        elif isinstance(content, Iterable):
+            content = MixedStyledText(content)
+        assert content.parent is None
+        content.parent = self
+        self.content = content
 
-    def text(self, container):
-        return self
+    def prepare(self, container):
+        super().prepare(container)
+        self.content.prepare(container)
+        if self.has_title:
+            for id in self.referenceable.get_ids(container.document):
+                container.document.set_reference(id, 'title', self.content)
+
+    def _text(self, container):
+        return self.content
+
+
+class Paragraph(StaticParagraph):
+    pass
 
 
 class HyphenatorStore(dict):
@@ -848,14 +947,20 @@ class Word(LinePart, list):
 
 class Line(list):
     """Helper class for building and typesetting a single line of text within
-    a :class:`Paragraph`."""
+    a paragraph.
+
+    Args:
+        tab_stops (TabStopList): as given in the paragraph style
+        width (float): the available line width
+        container (Container); the render target for this line
+        indent (float): left indent width (positive or negative)
+        significant_whitespace (bool): whether to typeset whitespace as-is or
+            consider them as tokens separating words
+
+    """
 
     def __init__(self, tab_stops, width, container, indent=0,
                  significant_whitespace=False):
-        """`tab_stops` is a list of tab stops, as given in the paragraph style.
-        `width` is the available line width.
-        `indent` specifies the left indent width.
-        `container` passes the :class:`Container` that wil hold this line."""
         super().__init__()
         self.tab_stops = tab_stops
         self.width = width
@@ -870,7 +975,6 @@ class Line(list):
 
     def _handle_tab(self, glyphs_span):
         span = glyphs_span.span
-        self._has_tab = True
         for tab_stop in self.tab_stops:
             tab_position = tab_stop.get_position(self.width)
             if self.cursor < tab_position:
@@ -971,7 +1075,7 @@ class Line(list):
         # horizontal displacement
         left = self.indent
 
-        if self._has_tab or text_align == TextAlign.JUSTIFY and last_line:
+        if self._current_tab or text_align == TextAlign.JUSTIFY and last_line:
             text_align = 'left'
         extra_space = self.width - self.cursor
         if text_align == TextAlign.JUSTIFY:

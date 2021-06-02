@@ -22,15 +22,15 @@ import string
 
 from ast import literal_eval
 from collections import OrderedDict, namedtuple
+from contextlib import suppress
 from itertools import chain
-from operator import attrgetter
 from pathlib import Path
 
 from .attribute import (WithAttributes, AttributesDictionary,
                         RuleSet, RuleSetFile, Configurable,
                         DefaultValueException, Attribute, Bool)
 from .element import DocumentElement
-from .resource import Resource
+from .resource import Resource, ResourceNotFound
 from .util import (cached, all_subclasses, NotImplementedAttribute,
                    class_property)
 from .warnings import warn
@@ -98,12 +98,49 @@ class Style(AttributesDictionary, metaclass=StyleMeta):
         return document.stylesheet
 
 
-class ParentStyle(Style):
+class ExceptionalStyle(Style):
+    """Style that raises an exception on item access"""
+
+    string = None
+    exception = NotImplementedError
+
+    def __str__(self):
+        return self.string
+
+    def __getitem__(self, item):
+        raise self.exception
+
+
+class ParentStyleException(Exception):
+    pass
+
+
+class ParentStyle(ExceptionalStyle):
     """Style that forwards attribute lookups to the parent of the
     :class:`Styled` from which the lookup originates."""
 
+    string = 'PARENT_STYLE'
+    exception = ParentStyleException
+
+
+class NextMatchException(Exception):
+    pass
+
+
+class NextStyle(ExceptionalStyle):
+    """Style that forwards attribute lookups to the next style in the style
+    sheet that matches the :class:`Styled` from which the lookup originates."""
+
+    string = 'NEXT_STYLE'
+    exception = NextMatchException
+
 
 PARENT_STYLE = ParentStyle()
+NEXT_STYLE = NextStyle()
+
+
+EXCEPTIONAL_STYLES = {PARENT_STYLE.string: PARENT_STYLE,
+                      NEXT_STYLE.string: NEXT_STYLE}
 
 
 class Selector(object):
@@ -131,7 +168,7 @@ class Selector(object):
         return self.pri(-1)
 
     def __eq__(self, other):
-        return self.__dict__ == other.__dict__
+        return type(self) == type(other) and self.__dict__ == other.__dict__
 
     def pri(self, priority):
         return SelectorWithPriority(self, priority)
@@ -398,13 +435,13 @@ class Styled(DocumentElement, Configurable, metaclass=StyledMeta):
     """The :class:`Style` subclass that corresponds to this :class:`Styled`
     subclass."""
 
-    def __init__(self, id=None, style=None, parent=None):
+    def __init__(self, id=None, style=None, parent=None, source=None):
         """Associates `style` with this element. If `style` is `None`, an empty
         :class:`Style` is create, effectively using the defaults defined for the
         associated :class:`Style` class).
         A `parent` can be passed on object initialization, or later by
         assignment to the `parent` attribute."""
-        super().__init__(id=id, parent=parent)
+        super().__init__(id=id, parent=parent, source=source)
         if (isinstance(style, Style)
                 and not isinstance(style, (self.style_class, ParentStyle))):
             raise TypeError('the style passed to {} should be of type {} '
@@ -413,6 +450,7 @@ class Styled(DocumentElement, Configurable, metaclass=StyledMeta):
                                     self.style_class.__name__,
                                     style.__class__.__name__))
         self.style = style
+        self.annotation = None
         self.classes = []
 
     def __eq__(self, other):
@@ -458,25 +496,25 @@ class Styled(DocumentElement, Configurable, metaclass=StyledMeta):
         except AttributeError:
             return 0
 
-    def configuration_name(self, document):
-        try:    # TODO: make document hashable so @cached can be used?
-            return self._style_name
-        except AttributeError:
-            ruleset = self.configuration_class.get_ruleset(document)
-            self._style_name = ruleset.find_style(self, document)
-            return self._style_name
-
     def fallback_to_parent(self, attribute):
         return isinstance(self.style, ParentStyle)
 
+    def get_annotation(self, container):
+        return self.annotation
+
     @cached
     def get_style(self, attribute, container):
-        if isinstance(self.style, Style):
-            try:
-                return self.style[attribute]
+        if isinstance(self.style, Style):    # FIXME: properly handle this
+            try:                             #        handling a PARENT_STYLE
+                return self.style[attribute] #        base (and other cases?)
             except KeyError:
                 pass
         return self.get_config_value(attribute, container.document)
+
+    @property
+    def has_id(self):
+        """Filter selection on an ID of this :class:`Styled`"""
+        return HasID(self)
 
     @property
     def has_class(self):
@@ -491,6 +529,14 @@ class Styled(DocumentElement, Configurable, metaclass=StyledMeta):
     def before_placing(self, container):
         if self.parent:
             self.parent.before_placing(container)
+
+
+class HasID(object):
+    def __init__(self, styled):
+        self.styled = styled
+
+    def __eq__(self, id):
+        return id == self.styled.id or id in self.styled.secondary_ids
 
 
 class HasClass(object):
@@ -600,19 +646,19 @@ class StyleSheet(RuleSet, Resource):
     main_section = 'STYLESHEET'
     extension = '.rts'
 
-    def __init__(self, name, matcher=None, base=None, description=None,
-                 pygments_style=None, **user_options):
+    def __init__(self, name, matcher=None, base=None, source=None,
+                 description=None, pygments_style=None, **user_options):
         from .highlight import pygments_style_to_stylesheet
         from .stylesheets import matcher as default_matcher
 
-        base = self.from_string(base) if isinstance(base, str) else base
+        base = self.from_string(base, self) if isinstance(base, str) else base
         if matcher is None:
             matcher = default_matcher if base is None else StyledMatcher()
         if matcher is not None:
             matcher.check_validity()
         if pygments_style:
             base = pygments_style_to_stylesheet(pygments_style, base)
-        super().__init__(name, base=base)
+        super().__init__(name, base=base, source=source)
         self.description = description
         self.matcher = matcher
         if user_options:
@@ -627,20 +673,17 @@ class StyleSheet(RuleSet, Resource):
         raise NotImplementedError
 
     @classmethod
-    def parse_string(cls, filename_or_resource_name):
-        stylesheet_path = Path(filename_or_resource_name)
-        if stylesheet_path.is_file():
-            return StyleSheetFile(filename_or_resource_name)
-        else:
-            return super().parse_string(filename_or_resource_name)
+    def parse_string(cls, string, source):
+        with suppress(ResourceNotFound):
+            return super().parse_string(string, source)
+        return StyleSheetFile(string, source=source)
 
     @classmethod
     def doc_repr(cls, value):
-        for name, entry_point in cls.installed_resources:
-            if value is entry_point.load():
-                object_name, = entry_point.attrs
+        for name, ep in cls.installed_resources:
+            if value is ep.load():
                 return ('``{}`` (= :data:`{}.{}`)'
-                        .format(name, entry_point.module_name, object_name))
+                        .format(name, *ep.value.split(':')))
         raise NotImplementedError
 
     @classmethod
@@ -651,11 +694,17 @@ class StyleSheet(RuleSet, Resource):
 
     def _get_value_lookup(self, styled, attribute, document):
         try:
-            return super()._get_value_lookup(styled, attribute, document)
-        except DefaultValueException:
-            if styled.fallback_to_parent(attribute):
-                return self._get_value_lookup(styled.parent, attribute, document)
-            raise
+            for match in document.get_matches(styled):
+                if match.stylesheet:      # style is defined
+                    with suppress(NextMatchException):
+                        return self.get_value(match.style_name, attribute)
+            raise DefaultValueException   # no matching styles define attribute
+        except DefaultValueException:     # fallback to default style
+            if not styled.fallback_to_parent(attribute):
+                raise
+        except ParentStyleException:      # fallback to parent's style
+            pass
+        return self._get_value_lookup(styled.parent, attribute, document)
 
     def get_styled(self, name):
         return self.get_selector(name).get_styled_class(self)
@@ -691,20 +740,6 @@ class StyleSheet(RuleSet, Resource):
             yield match
         if self.base is not None:
             yield from self.base.find_matches(styled, document)
-
-    def find_style(self, styled, document):
-        matches = sorted(self.find_matches(styled, document),
-                         key=attrgetter('specificity'), reverse=True)
-        last_match = Match(None, ZERO_SPECIFICITY)
-        for match in matches:
-            if (match.specificity == last_match.specificity
-                    and match.style_name != last_match.style_name):
-                styled.warn('Multiple selectors match with the same '
-                            'specificity. See the style log for details.')
-            if self.contains(match.style_name):
-                return match.style_name
-            last_match = match
-        raise DefaultValueException
 
     def write(self, base_filename):
         from configparser import ConfigParser
@@ -778,8 +813,14 @@ class StyleSheetFile(RuleSetFile, StyleSheet):
                 style_cls = self.get_entry_class(style_name)
             except KeyError:
                 warn("The style definition '{}' will be ignored since there"
-                     " is no selector defined for it in the matcher.")
-        self[style_name] = style_cls(**dict(items))
+                     " is no selector defined for it in the matcher."
+                     .format(style_name))
+                return
+        kwargs = dict(items)
+        base = kwargs.pop('base', None)
+        if base in EXCEPTIONAL_STYLES:
+            base = EXCEPTIONAL_STYLES[base]
+        self[style_name] = style_cls(base=base, **kwargs)
 
 
 class StyleParseError(Exception):
@@ -863,7 +904,7 @@ def parse_selector_args(chars):
         if chars.peek() == ',':
             next(chars)
             eat_whitespace(chars)
-    if next(chars) != ')':
+    if chars.peek() is None or next(chars) != ')':
         raise StyleParseError('Expecting a closing brace')
     return args, kwargs
 
@@ -964,6 +1005,7 @@ class Match(object):
     def __init__(self, style_name, specificity):
         self.style_name = style_name
         self.specificity = specificity
+        self.stylesheet = None
 
     def __gt__(self, other):
         return self.specificity > other.specificity
@@ -997,7 +1039,7 @@ class StyleLog(object):
         self.entries = []
 
     def log_styled(self, styled, container, continued, custom_message=None):
-        matches = self.stylesheet.find_matches(styled, container.document)
+        matches = container.document.get_matches(styled)
         log_entry = StyleLogEntry(styled, container, matches, continued,
                                   custom_message)
         self.entries.append(log_entry)
@@ -1005,7 +1047,7 @@ class StyleLog(object):
     def log_out_of_line(self):
         raise NotImplementedError
 
-    def write_log(self, filename_root):
+    def write_log(self, document_source_root, filename_root):
         stylelog_path = filename_root.with_suffix('.stylelog')
         with stylelog_path.open('w', encoding='utf-8') as log:
             current_page = None
@@ -1026,15 +1068,36 @@ class StyleLog(object):
                 attrs = OrderedDict()
                 style = None
                 indent = '  ' * level
-                if styled.parent and (styled.source.location
-                                      != styled.parent.source.location):
-                    location = '   ' + styled.source.location
-                else:
-                    location = ''
+                loc = ''
+                if styled.source:
+                    try:
+                        filename, line, tag_name = styled.source.location
+                    except ValueError:
+                        loc = f'   {styled.source.location}'
+                    else:
+                        if filename:
+                            try:
+                                filename, extra = filename.split(':')
+                            except ValueError:
+                                extra = None
+                            file_path = Path(filename)
+                            if file_path.is_absolute():
+                                try:
+                                    file_path = file_path.relative_to(
+                                        document_source_root)
+                                except ValueError:
+                                    pass
+                            loc = f'   {file_path}'
+                            if line:
+                                loc += f':{line}'
+                            if extra:
+                                loc += f' ({extra})'
+                        if tag_name:
+                            loc += f'   <{tag_name}>'
                 continued_text = '(continued) ' if entry.continued else ''
                 log.write('  {}{}{}{}'
                           .format(indent, continued_text,
-                                  styled.short_repr(container), location))
+                                  styled.short_repr(container), loc))
                 if entry.custom_message:
                     log.write('\n      {} ! {}\n'.format(indent,
                                                          entry.custom_message))
@@ -1046,26 +1109,33 @@ class StyleLog(object):
                                             for key, value in style.items())
                     log.write('\n      {} > {}({})'
                               .format(indent, attrs['style'], style_attrs))
-                matches = sorted(entry.matches, reverse=True,
-                                 key=attrgetter('specificity'))
-                if matches:
-                    for match in matches:
-                        if self.stylesheet.contains(match.style_name):
+                if entry:
+                    for match in entry.matches:
+                        base = ''
+                        stylesheet = match.stylesheet
+                        if stylesheet:
                             if first:
-                                name = match.style_name
-                                style = self.stylesheet.get_configuration(name)
                                 label = '>'
                                 first = False
                             else:
                                 label = ' '
+                            name = match.style_name
+                            style = self.stylesheet.get_configuration(name)
+                            base_name = ("DEFAULT" if style.base is None
+                                         else str(style.base))
+                            base = f' > {base_name}'
+                            stylesheet_path = Path(stylesheet)
+                            if stylesheet_path.is_absolute():
+                                stylesheet = stylesheet_path.relative_to(
+                                    document_source_root)
                         else:
                             label = 'x'
                         specificity = ','.join(str(score)
                                                for score in match.specificity)
-                        log.write('\n      {} {} ({}) {}'
+
+                        log.write('\n      {} {} ({}) {}{}{}'
                                   .format(indent, label, specificity,
-                                          match.style_name))
-                    if style is None:
-                        log.write('\n      {} > fallback to default style'
-                                  .format(indent))
+                                          match.style_name,
+                                          f' [{stylesheet}]' if stylesheet
+                                          else '', base))
                 log.write('\n')

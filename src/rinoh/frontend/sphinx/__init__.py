@@ -381,6 +381,7 @@ def variable_removed_warnings(config, logger):
 def setup(app):
     app.add_builder(RinohBuilder)
     app.add_post_transform(transforms.RinohCitationReferenceTransform)
+    app.add_post_transform(transforms.RinohPlantumlTransform)
     app.add_config_value('rinoh_documents', None, 'env', (dict, list))
     app.add_config_value('rinoh_targets', None, 'env', (list, str))
     # the following are no longer supported and have no effect

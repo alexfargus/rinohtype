@@ -2563,11 +2563,14 @@ class Reader(object):
             keyword = str(keyword, 'latin-1')
         except:
             pass
-        if (data[i:i + 1] != zerobyte):
+        compress_flag = data[i + 1: i + 2]
+        compress_method = data[i + 2: i + 3]
+        if (compress_flag != zerobyte):
             # TODO: Support for compression!!
             return
         # TODO: Raise FormatError
-        assert (data[i + 1:i + 2] == zerobyte)
+        assert (compress_method == zerobyte)
+
         data_ = data[i + 3:]
         i = data_.index(zerobyte)
         # skip language tag

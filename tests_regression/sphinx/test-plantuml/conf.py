@@ -18,7 +18,7 @@
 
 # -- Project information -----------------------------------------------------
 
-project = 'Citations'
+project = 'Plantuml'
 copyright = '1999, Author'
 author = 'Author'
 
@@ -71,7 +71,7 @@ pygments_style = 'sphinx'
 
 rinoh_documents = [{
     'doc': master_doc,          # top-level file (index.rst)
-    'target': 'citations',      # output (target.pdf)
+    'target': 'plantuml',       # output (target.pdf)
     'title': project,           # document title
     'author': author,           # document author
     'template': 'article'       # document template

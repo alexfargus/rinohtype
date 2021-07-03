@@ -43,7 +43,8 @@ class RinohPlantumlTransform(SphinxPostTransform):
             except PlantUmlError as err:
                 logger.warning(str(err))
                 raise nodes.SkipNode
-            image_node = nodes.image(uri=image_path, alt=node.get('alt', node['uml']))
+            kwargs = {attr: node.get(attr) for attr in ('scale', 'width', 'height') if attr in node}
+            image_node = nodes.image(uri=image_path, alt=node.get('alt', node['uml']), **kwargs)
             image_node['candidates']= {'*': path.join(self.app.srcdir, image_path)}
             node.parent.replace(node, image_node)
             self.env.images.add_file(self.env.docname, image_path)
